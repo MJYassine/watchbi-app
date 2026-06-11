@@ -1,0 +1,1523 @@
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import {
+  BarChart, Bar, LineChart, Line, XAxis, YAxis,
+  CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend,
+} from "recharts";
+import {
+  Upload, FileSpreadsheet, Boxes, TrendingUp, Sparkles, Send,
+  Check, X, AlertTriangle, Lock, Watch, Trash2, ArrowRight,
+} from "lucide-react";
+import * as XLSX from "xlsx";
+
+/* =========================================================================
+   THEME — refined "horology" look: warm near-black, champagne accent, cream.
+   ========================================================================= */
+const C = {
+  bg: "#15120e",
+  panel: "#1d1913",
+  panel2: "#241f17",
+  line: "#3a3225",
+  text: "#efe7d6",
+  dim: "#a99f88",
+  faint: "#6f6754",
+  gold: "#c8a96a",
+  gold2: "#e2c98c",
+  green: "#7faa6f",
+  red: "#c1715f",
+  blue: "#7c93b3",
+};
+const SERIF = "'Fraunces', Georgia, 'Times New Roman', serif";
+const SANS = "'DM Sans', -apple-system, system-ui, sans-serif";
+
+const TARGET_BRANDS = ["rolex", "patek philippe", "audemars piguet", "omega"];
+const BRAND_ALIAS = {
+  patek: "patek philippe", "patek phillipe": "patek philippe", pp: "patek philippe",
+  ap: "audemars piguet", audemars: "audemars piguet", "audemars piguet": "audemars piguet",
+  rolex: "rolex", omega: "omega",
+};
+
+const LINE_KEYWORDS = {
+  rolex: ["sea-dweller", "sky-dweller", "yacht-master", "gmt-master", "day-date",
+    "datejust", "submariner", "daytona", "explorer", "oyster perpetual", "air-king",
+    "milgauss", "cellini"],
+  "patek philippe": ["nautilus", "aquanaut", "calatrava", "grand complications",
+    "complications", "twenty", "golden ellipse", "gondolo"],
+  "audemars piguet": ["royal oak offshore", "royal oak concept", "royal oak",
+    "code 11.59", "millenary"],
+  omega: ["speedmaster", "moonwatch", "seamaster", "diver 300m", "aqua terra",
+    "planet ocean", "constellation", "de ville", "railmaster", "ploprof"],
+};
+const LINE_NORMALIZE = {
+  moonwatch: "Speedmaster", "diver 300m": "Seamaster",
+  "aqua terra": "Seamaster", "planet ocean": "Seamaster",
+};
+
+/* Canonical fields per dataset role. */
+const FIELDS = {
+  inventory: [
+    ["brand", "Brand"], ["modelName", "Model name"], ["modelNumber", "Model / reference #"],
+    ["cost", "Cost (total)"], ["purchaseDate", "Purchase date"],
+    ["targetWholesale", "Target wholesale price"], ["tagPrice", "Tag price"],
+    ["status", "Status"], ["serial", "Serial #"],
+  ],
+  sales: [
+    ["saleDate", "Sale / invoice date"], ["purchaseDate", "Purchase date"],
+    ["cost", "Cost (COGS)"], ["salePrice", "Sale / invoice price"],
+    ["profit", "Profit $ (optional)"], ["brand", "Brand (optional)"],
+    ["modelName", "Model name (optional)"], ["modelNumber", "Model / reference # (optional)"],
+    ["inventoryType", "Inventory type (optional)"], ["serial", "Serial # (optional)"],
+  ],
+};
+
+/* ---- header auto-detect ---- */
+function guessField(role, header) {
+  const h = String(header).trim().toLowerCase();
+  const has = (s) => h.includes(s);
+  if (has("brand")) return "brand";
+  if (has("model name") || has("title item")) return "modelName";
+  if (has("model number") || has("reference") || h === "ref") return "modelNumber";
+  if (role === "sales") {
+    if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
+    if (has("invoice price") || has("sale price") || has("sold price")) return "salePrice";
+    if (h === "profit") return "profit";
+    if (has("inventory type") || h === "type") return "inventoryType";
+  }
+  if (has("purchase date") || has("purchased date")) return "purchaseDate";
+  if (has("cogs") || has("total cost") || h === "cost") return "cost";
+  if (has("wholesale")) return "targetWholesale";
+  if (has("tag price")) return "tagPrice";
+  if (has("status") && !has("payment")) return "status";
+  if (has("serial")) return "serial";
+  return null;
+}
+
+function autoMap(role, columns) {
+  const map = {};
+  const taken = new Set();
+  for (const col of columns) {
+    const f = guessField(role, col);
+    if (f && !taken.has(f)) { map[f] = col; taken.add(f); }
+  }
+  return map;
+}
+
+function guessRole(columns) {
+  const lower = columns.map((c) => String(c).toLowerCase());
+  const any = (s) => lower.some((c) => c.includes(s));
+  if (any("invoice date") || any("invoice price") || any("sale date")) return "sales";
+  if (any("brand") || any("wholesale") || any("inventory status") || any("model number"))
+    return "inventory";
+  return "ignore";
+}
+
+/* ---- value coercion ---- */
+function toNum(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return v;
+  const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  return isNaN(n) ? null : n;
+}
+function toDate(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) return isNaN(v) ? null : v;
+  if (typeof v === "number") { // excel serial
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d) ? null : d;
+  }
+  const d = new Date(v);
+  return isNaN(d) ? null : d;
+}
+function daysBetween(a, b) {
+  if (!a || !b) return null;
+  return Math.round((b - a) / 86400000);
+}
+
+function normalizeBrand(b) {
+  if (!b) return null;
+  let s = String(b).trim().toLowerCase();
+  if (BRAND_ALIAS[s]) s = BRAND_ALIAS[s];
+  return s;
+}
+function findLine(brandNorm, modelName) {
+  if (!brandNorm || !TARGET_BRANDS.includes(brandNorm)) return null;
+  const name = String(modelName || "").toLowerCase();
+  const kws = LINE_KEYWORDS[brandNorm] || [];
+  for (const kw of kws) {
+    if (name.includes(kw)) {
+      const norm = LINE_NORMALIZE[kw];
+      return norm || kw.replace(/\b\w/g, (m) => m.toUpperCase());
+    }
+  }
+  return "Other";
+}
+/* "Other" is ambiguous on its own across brands — tie it to the brand name. */
+function lineLabel(brand, line) {
+  if (!line) return line;
+  if (line === "Other") {
+    const b = String(brand || "").trim();
+    return b ? `${b} — Other` : "Other";
+  }
+  return line;
+}
+
+/* ---- stock health ----
+   weeklyVelocity = units sold per week (over the observed sales window).
+   weeksOfStock   = how many weeks current stock will last at that pace.
+   red    = under 1 week of stock left (or zero stock with active sales) -> buy now
+   yellow = under 2 weeks of stock left -> buy soon
+   green  = healthy
+*/
+function stockHealth(stock, weeklyVelocity) {
+  if (stock == null) return null;
+  if (!weeklyVelocity || weeklyVelocity <= 0) return stock === 0 ? null : "green";
+  if (stock === 0) return "red";
+  const weeks = stock / weeklyVelocity;
+  if (weeks < 1) return "red";
+  if (weeks < 2) return "yellow";
+  return "green";
+}
+/* Adds weeklyVelocity / weeksOfStock / health / buyScore to a list of
+   { units, profit, avgProfit, medianDays, stock } rows. */
+function enrichRanking(arr, weeks) {
+  if (!arr || !arr.length) return arr || [];
+  const maxV = Math.max(...arr.map((x) => x.units || 0)) || 1;
+  const maxP = Math.max(...arr.map((x) => x.avgProfit || 0)) || 1;
+  const maxD = Math.max(...arr.map((x) => x.medianDays || 0)) || 1;
+  return arr.map((x) => {
+    const weeklyVelocity = weeks > 0 ? x.units / weeks : 0;
+    const weeksOfStock = (x.stock != null && weeklyVelocity > 0)
+      ? +(x.stock / weeklyVelocity).toFixed(2) : null;
+    const health = stockHealth(x.stock, weeklyVelocity);
+    const vel = 1 - (x.medianDays ?? maxD) / maxD;
+    const prof = maxP ? (x.avgProfit || 0) / maxP : 0;
+    const vol = Math.log(1 + x.units) / Math.log(1 + maxV);
+    const stockPenalty = x.stock ? 1 / (1 + x.stock) : 1.15;
+    const buyScore = +((vel * 0.35 + prof * 0.35 + vol * 0.30) * stockPenalty).toFixed(3);
+    return {
+      ...x,
+      weeklyVelocity: +weeklyVelocity.toFixed(2),
+      weeksOfStock, health, buyScore,
+    };
+  });
+}
+
+const fmtMoney = (n) =>
+  n == null ? "--" : "$" + Math.round(n).toLocaleString();
+const fmtK = (n) =>
+  n == null ? "--" : Math.abs(n) >= 1000 ? "$" + (n / 1000).toFixed(0) + "k" : "$" + Math.round(n);
+const fmtPct = (n) => (n == null ? "--" : n.toFixed(1) + "%");
+const median = (arr) => {
+  const a = arr.filter((x) => x != null).sort((x, y) => x - y);
+  if (!a.length) return null;
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+};
+
+/* =========================================================================
+   METRICS ENGINE
+   ========================================================================= */
+function computeMetrics(datasets) {
+  const inv = datasets.find((d) => d.role === "inventory");
+  const sal = datasets.find((d) => d.role === "sales");
+  const today = new Date();
+  const out = { hasInv: !!inv, hasSales: !!sal };
+
+  /* ----- inventory ----- */
+  if (inv) {
+    const m = inv.mapping;
+    const items = inv.rows.map((r) => {
+      const cost = toNum(r[m.cost]);
+      const tw = toNum(r[m.targetWholesale]);
+      const tag = toNum(r[m.tagPrice]);
+      const brandNorm = normalizeBrand(r[m.brand]);
+      const pd = toDate(r[m.purchaseDate]);
+      return {
+        brand: r[m.brand] || "Unknown",
+        brandNorm,
+        line: findLine(brandNorm, r[m.modelName]),
+        modelName: r[m.modelName],
+        cost: cost || 0,
+        targetWholesale: tw,
+        tagPrice: tag,
+        age: pd ? daysBetween(pd, today) : null,
+        status: r[m.status],
+      };
+    });
+    out.invCount = items.length;
+    out.invCost = items.reduce((s, x) => s + x.cost, 0);
+
+    const byBrand = {};
+    items.forEach((x) => {
+      const k = x.brand;
+      byBrand[k] = byBrand[k] || { brand: k, count: 0, cost: 0 };
+      byBrand[k].count++; byBrand[k].cost += x.cost;
+    });
+    out.invByBrand = Object.values(byBrand).sort((a, b) => b.cost - a.cost);
+    out.invBrandCount = out.invByBrand.length;
+
+    const byLine = {};
+    items.filter((x) => x.line).forEach((x) => {
+      const lbl = lineLabel(x.brand, x.line);
+      const k = x.brand + " · " + lbl;
+      byLine[k] = byLine[k] || { key: k, brand: x.brand, line: lbl, count: 0, cost: 0 };
+      byLine[k].count++; byLine[k].cost += x.cost;
+    });
+    out.invByLine = Object.values(byLine).sort((a, b) => b.cost - a.cost);
+
+    const buckets = [
+      { label: "0-30", lo: 0, hi: 30 }, { label: "31-60", lo: 31, hi: 60 },
+      { label: "61-90", lo: 61, hi: 90 }, { label: "91-180", lo: 91, hi: 180 },
+      { label: "180+", lo: 181, hi: 1e9 },
+    ].map((b) => ({ ...b, count: 0, cost: 0 }));
+    items.forEach((x) => {
+      if (x.age == null) return;
+      const b = buckets.find((q) => x.age >= q.lo && x.age <= q.hi);
+      if (b) { b.count++; b.cost += x.cost; }
+    });
+    out.aging = buckets;
+    out.agedValue = buckets.filter((b) => b.lo >= 91).reduce((s, b) => s + b.cost, 0);
+
+    const withTarget = items.filter((x) => x.targetWholesale && x.targetWholesale > 0);
+    out.projItems = withTarget.length;
+    out.projProfit = withTarget.reduce((s, x) => s + (x.targetWholesale - x.cost), 0);
+    const pbb = {};
+    withTarget.forEach((x) => {
+      pbb[x.brand] = pbb[x.brand] || { brand: x.brand, profit: 0, count: 0 };
+      pbb[x.brand].profit += x.targetWholesale - x.cost; pbb[x.brand].count++;
+    });
+    out.projByBrand = Object.values(pbb).sort((a, b) => b.profit - a.profit);
+
+    // projected profit by model
+    const pbm = {};
+    withTarget.forEach((x) => {
+      const key = (x.brand || "Unknown") + "|" + (x.modelName || "Unknown");
+      pbm[key] = pbm[key] || { brand: x.brand, model: x.modelName || "Unknown", profit: 0, cost: 0, tw: 0, count: 0 };
+      pbm[key].profit += x.targetWholesale - x.cost;
+      pbm[key].cost += x.cost;
+      pbm[key].tw += x.targetWholesale;
+      pbm[key].count++;
+    });
+    out.projByModel = Object.values(pbm).map((b) => ({
+      ...b,
+      marginPct: b.cost ? (b.profit / b.cost) * 100 : null,
+    })).sort((a, b) => b.profit - a.profit);
+
+    // current stock count per brand+model (for "are we out" once sales has model)
+    const stock = {};
+    items.forEach((x) => {
+      const key = (x.brandNorm || "") + "|" + String(x.modelName || "").toLowerCase();
+      stock[key] = (stock[key] || 0) + 1;
+    });
+    out._stock = stock;
+
+    // current stock count per brand+product line
+    const stockByLine = {};
+    items.filter((x) => x.line).forEach((x) => {
+      const lbl = lineLabel(x.brand, x.line);
+      const key = (x.brandNorm || "") + "|" + lbl.toLowerCase();
+      stockByLine[key] = (stockByLine[key] || 0) + 1;
+    });
+    out._stockByLine = stockByLine;
+  }
+
+  /* ----- sales ----- */
+  if (sal) {
+    const m = sal.mapping;
+    const rows = sal.rows.map((r) => {
+      const cost = toNum(r[m.cost]);
+      const price = toNum(r[m.salePrice]);
+      let profit = toNum(r[m.profit]);
+      if (profit == null && price != null && cost != null) profit = price - cost;
+      const pd = toDate(r[m.purchaseDate]);
+      const sdt = toDate(r[m.saleDate]);
+      let days = daysBetween(pd, sdt);
+      if (days != null && (days < 0 || days > 2000)) days = null; // typo guard
+      const brandNorm = normalizeBrand(r[m.brand]);
+      return {
+        saleDate: sdt, days, cost: cost || 0, price: price || 0,
+        profit: profit || 0,
+        marginPct: cost ? (profit / cost) * 100 : null,
+        brand: r[m.brand] || null, brandNorm,
+        line: findLine(brandNorm, r[m.modelName]),
+        modelName: r[m.modelName] || null,
+        type: r[m.inventoryType] || "Unspecified",
+      };
+    });
+    out.salesUnits = rows.length;
+    out.salesProfit = rows.reduce((s, x) => s + x.profit, 0);
+    out.salesRevenue = rows.reduce((s, x) => s + x.price, 0);
+    out.medianMargin = median(rows.map((x) => x.marginPct));
+    out.medianDays = median(rows.map((x) => x.days));
+    out.meanDays = (() => {
+      const a = rows.map((x) => x.days).filter((x) => x != null);
+      return a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
+    })();
+
+    // span of the sales data, in weeks (min 1) — used for sell-through velocity
+    out.salesWeeks = (() => {
+      const ds = rows.map((x) => x.saleDate).filter(Boolean).map((d) => d.getTime());
+      if (ds.length < 2) return 1;
+      const span = (Math.max(...ds) - Math.min(...ds)) / (7 * 86400000);
+      return Math.max(span, 1);
+    })();
+
+    // monthly
+    const mo = {};
+    rows.forEach((x) => {
+      if (!x.saleDate) return;
+      const k = x.saleDate.getFullYear() + "-" + String(x.saleDate.getMonth() + 1).padStart(2, "0");
+      mo[k] = mo[k] || { month: k, units: 0, profit: 0 };
+      mo[k].units++; mo[k].profit += x.profit;
+    });
+    out.monthly = Object.values(mo).sort((a, b) => a.month.localeCompare(b.month));
+
+    // by type (always available)
+    const bt = {};
+    rows.forEach((x) => {
+      bt[x.type] = bt[x.type] || { type: x.type, units: 0, profit: 0 };
+      bt[x.type].units++; bt[x.type].profit += x.profit;
+    });
+    out.salesByType = Object.values(bt).sort((a, b) => b.units - a.units);
+
+    // brand-level (only if brand present on sales)
+    out.salesHasBrand = rows.some((x) => x.brand);
+    if (out.salesHasBrand) {
+      const bb = {};
+      rows.forEach((x) => {
+        const k = x.brand || "Unknown";
+        bb[k] = bb[k] || { brand: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
+        bb[k].units++; bb[k].profit += x.profit; bb[k].revenue += x.price; bb[k].cost += x.cost;
+        if (x.days != null) bb[k]._days.push(x.days);
+        if (x.marginPct != null) bb[k]._m.push(x.marginPct);
+      });
+      out.salesByBrand = Object.values(bb).map((b) => ({
+        brand: b.brand, units: b.units, profit: b.profit, revenue: b.revenue,
+        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+        medianDays: median(b._days), medianMargin: median(b._m),
+      })).sort((a, b) => b.profit - a.profit);
+
+      // by product line
+      const bl = {};
+      rows.forEach((x) => {
+        if (!x.line) return;
+        const lbl = lineLabel(x.brand, x.line);
+        const k = (x.brand || "Unknown") + " · " + lbl;
+        bl[k] = bl[k] || { key: k, brand: x.brand, brandNorm: x.brandNorm, line: lbl, units: 0, profit: 0, cost: 0, _days: [], _m: [] };
+        bl[k].units++; bl[k].profit += x.profit; bl[k].cost += x.cost;
+        if (x.days != null) bl[k]._days.push(x.days);
+        if (x.marginPct != null) bl[k]._m.push(x.marginPct);
+      });
+      let lines = Object.values(bl).map((b) => ({
+        key: b.key, brand: b.brand, line: b.line, units: b.units, profit: b.profit,
+        avgProfit: b.profit / b.units,
+        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+        medianDays: median(b._days), medianMargin: median(b._m),
+        stock: out._stockByLine ? (out._stockByLine[(b.brandNorm || "") + "|" + b.line.toLowerCase()] ?? null) : null,
+      }));
+      out.salesByLine = enrichRanking(lines, out.salesWeeks).sort((a, b) => b.profit - a.profit);
+
+      // by model frequency + ranking + buy score
+      const bm = {};
+      rows.forEach((x) => {
+        const name = x.modelName || x.brand;
+        const k = (x.brand || "") + "|" + name;
+        bm[k] = bm[k] || { key: k, brand: x.brand, line: lineLabel(x.brand, x.line), model: name, brandNorm: x.brandNorm, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
+        bm[k].units++; bm[k].profit += x.profit; bm[k].revenue += x.price; bm[k].cost += x.cost;
+        if (x.days != null) bm[k]._days.push(x.days);
+        if (x.marginPct != null) bm[k]._m.push(x.marginPct);
+      });
+      let models = Object.values(bm).map((b) => ({
+        brand: b.brand, line: b.line, model: b.model, units: b.units, profit: b.profit, revenue: b.revenue,
+        avgProfit: b.profit / b.units,
+        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+        medianDays: median(b._days), medianMargin: median(b._m),
+        stock: out._stock ? (out._stock[(b.brandNorm || "") + "|" + String(b.model || "").toLowerCase()] ?? null) : null,
+      }));
+      models = enrichRanking(models, out.salesWeeks);
+      out.salesByModel = [...models].sort((a, b) => b.units - a.units);
+      out.ranking = [...models].sort((a, b) => b.buyScore - a.buyScore);
+      out.byVelocity = [...models]
+        .filter((x) => x.medianDays != null)
+        .sort((a, b) => a.medianDays - b.medianDays);
+      // combined velocity × profit ranking (for Q3)
+      const maxP2 = Math.max(...models.map((x) => x.avgProfit || 0)) || 1;
+      const maxD2 = Math.max(...models.map((x) => x.medianDays || 0)) || 1;
+      out.velProfRanking = [...models].sort((a, b) => {
+        const scoreA = (1 - (a.medianDays ?? maxD2) / maxD2) * 0.5 + (maxP2 ? (a.avgProfit || 0) / maxP2 : 0) * 0.5;
+        const scoreB = (1 - (b.medianDays ?? maxD2) / maxD2) * 0.5 + (maxP2 ? (b.avgProfit || 0) / maxP2 : 0) * 0.5;
+        return scoreB - scoreA;
+      });
+
+      // ── Top-10 lists (model & product-line granularity) ──
+      const top = (arr, n, sortFn) => [...arr].sort(sortFn).slice(0, n);
+      out.fastestModels = top(models.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
+      out.fastestLines = top(out.salesByLine.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
+      out.bestProfitModels = top(models, 10, (a, b) => b.profit - a.profit);
+      out.bestProfitLines = top(out.salesByLine, 10, (a, b) => b.profit - a.profit);
+      out.bestScoreModels = top(models, 10, (a, b) => b.buyScore - a.buyScore);
+      out.bestScoreLines = top(out.salesByLine, 10, (a, b) => b.buyScore - a.buyScore);
+
+      // ── Stock health lists ──
+      const healthRank = { red: 0, yellow: 1, green: 2 };
+      out.healthByVelocityModels = models.filter((x) => x.health)
+        .sort((a, b) => (a.weeksOfStock ?? 1e9) - (b.weeksOfStock ?? 1e9));
+      out.healthByVelocityLines = out.salesByLine.filter((x) => x.health)
+        .sort((a, b) => (a.weeksOfStock ?? 1e9) - (b.weeksOfStock ?? 1e9));
+      out.healthByScoreModels = models.filter((x) => x.health)
+        .sort((a, b) => (healthRank[a.health] - healthRank[b.health]) || (b.buyScore - a.buyScore));
+      out.healthByScoreLines = out.salesByLine.filter((x) => x.health)
+        .sort((a, b) => (healthRank[a.health] - healthRank[b.health]) || (b.buyScore - a.buyScore));
+    }
+  }
+  return out;
+}
+
+/* Compact summary handed to the chatbot — computed aggregates only. */
+function metricsForChat(M) {
+  const o = {
+    inventory_loaded: M.hasInv, sales_loaded: M.hasSales,
+    sales_has_brand_or_model: !!M.salesHasBrand,
+  };
+  if (M.hasInv) {
+    o.inventory = {
+      items: M.invCount, total_cost: Math.round(M.invCost),
+      brands: M.invBrandCount,
+      by_brand: M.invByBrand.slice(0, 20).map((b) => ({ brand: b.brand, count: b.count, cost: Math.round(b.cost) })),
+      by_line: M.invByLine.map((b) => ({ brand: b.brand, line: b.line, count: b.count })),
+      aging: M.aging.map((b) => ({ bucket: b.label, items: b.count, cost: Math.round(b.cost) })),
+      aged_capital_91plus: Math.round(M.agedValue),
+      projected_profit_items: M.projItems,
+      projected_profit_total: Math.round(M.projProfit),
+      projected_profit_note: "only computed on items that have a target wholesale price",
+    };
+  }
+  if (M.hasSales) {
+    o.sales = {
+      units_sold: M.salesUnits, total_profit: Math.round(M.salesProfit),
+      revenue: Math.round(M.salesRevenue),
+      median_margin_pct: M.medianMargin && +M.medianMargin.toFixed(1),
+      median_days_to_sell: M.medianDays, mean_days_to_sell: M.meanDays && Math.round(M.meanDays),
+      by_inventory_type: M.salesByType,
+      monthly: M.monthly,
+    };
+    if (M.salesHasBrand) {
+      o.sales.by_brand = M.salesByBrand.map((b) => ({
+        brand: b.brand, units: b.units, profit: Math.round(b.profit),
+        median_days: b.medianDays, median_margin_pct: b.medianMargin && +b.medianMargin.toFixed(1),
+      }));
+      o.sales.top_models_by_frequency = M.salesByModel.slice(0, 15).map((b) => ({
+        brand: b.brand, model: b.model, units: b.units,
+        avg_profit: Math.round(b.avgProfit), median_days: b.medianDays, current_stock: b.stock,
+      }));
+      o.sales.ranked_buy_list = M.ranking.slice(0, 15).map((b) => ({
+        brand: b.brand, model: b.model, buy_score: b.buyScore,
+        units_sold: b.units, avg_profit: Math.round(b.avgProfit),
+        median_days: b.medianDays, current_stock: b.stock,
+        weekly_velocity: b.weeklyVelocity, weeks_of_stock: b.weeksOfStock, stock_health: b.health,
+      }));
+      o.sales.fastest_models = M.fastestModels.map((b) => ({ brand: b.brand, model: b.model, median_days: b.medianDays }));
+      o.sales.fastest_lines = M.fastestLines.map((b) => ({ brand: b.brand, line: b.line, median_days: b.medianDays }));
+      o.sales.best_profit_models = M.bestProfitModels.map((b) => ({ brand: b.brand, model: b.model, profit: Math.round(b.profit) }));
+      o.sales.best_profit_lines = M.bestProfitLines.map((b) => ({ brand: b.brand, line: b.line, profit: Math.round(b.profit) }));
+      o.sales.stock_health_urgent = M.healthByVelocityModels.filter((b) => b.health !== "green").slice(0, 15).map((b) => ({
+        brand: b.brand, model: b.model, health: b.health, weeks_of_stock: b.weeksOfStock,
+        current_stock: b.stock, weekly_velocity: b.weeklyVelocity,
+      }));
+    } else {
+      o.sales.brand_model_breakdowns = "UNAVAILABLE — the sales data has no brand or model/reference column, so velocity/profit/frequency by brand, line, or model cannot be computed yet. Tell the user this plainly when relevant.";
+    }
+  }
+  return o;
+}
+
+/* =========================================================================
+   UI PRIMITIVES
+   ========================================================================= */
+function Stat({ label, value, sub }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14 }}
+      className="p-4 flex flex-col gap-1">
+      <div style={{ color: C.dim, fontFamily: SANS, letterSpacing: ".06em" }}
+        className="text-xs uppercase">{label}</div>
+      <div style={{ color: C.text, fontFamily: SERIF }} className="text-2xl">{value}</div>
+      {sub && <div style={{ color: C.faint, fontFamily: SANS }} className="text-xs">{sub}</div>}
+    </div>
+  );
+}
+function Panel({ title, children, note }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14 }} className="p-4">
+      <div className="flex items-baseline justify-between mb-3">
+        <h3 style={{ color: C.text, fontFamily: SERIF }} className="text-lg">{title}</h3>
+        {note && <span style={{ color: C.faint, fontFamily: SANS }} className="text-xs">{note}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+function Locked({ msg }) {
+  return (
+    <div style={{ color: C.faint, fontFamily: SANS, border: `1px dashed ${C.line}`, borderRadius: 12 }}
+      className="p-6 flex items-center gap-3 text-sm">
+      <Lock size={18} /> <span>{msg}</span>
+    </div>
+  );
+}
+const chartTip = {
+  contentStyle: { background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 10, fontFamily: SANS, color: C.text },
+  labelStyle: { color: C.dim }, itemStyle: { color: C.text },
+};
+
+/* health badge: red = buy now, yellow = buy soon, green = healthy */
+const HEALTH_CFG = {
+  red: { bg: C.red, label: "BUY NOW" },
+  yellow: { bg: "#c8863a", label: "BUY SOON" },
+  green: { bg: C.green, label: "OK" },
+};
+function HealthBadge({ health, weeksOfStock }) {
+  if (!health) return <span style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>—</span>;
+  const cfg = HEALTH_CFG[health];
+  return (
+    <span style={{
+      background: cfg.bg, color: "#1a1410", borderRadius: 6, fontFamily: SANS,
+      fontWeight: 700, fontSize: 11, padding: "3px 8px", letterSpacing: ".03em", whiteSpace: "nowrap",
+    }}>
+      {cfg.label}{weeksOfStock != null ? ` · ${weeksOfStock}w` : ""}
+    </span>
+  );
+}
+
+/* brand filter chips — shared across Sales & Buy tabs */
+function BrandFilter({ brands, selected, onToggle, onAll }) {
+  if (!brands || brands.length < 2) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-1">
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }}>
+        Filter
+      </span>
+      <button onClick={onAll}
+        style={{
+          fontFamily: SANS, borderRadius: 999, fontSize: 12,
+          border: `1px solid ${selected.size === brands.length ? C.gold : C.line}`,
+          background: selected.size === brands.length ? C.gold : "transparent",
+          color: selected.size === brands.length ? C.bg : C.dim,
+        }} className="px-3 py-1">All</button>
+      {brands.map((b) => (
+        <button key={b} onClick={() => onToggle(b)}
+          style={{
+            fontFamily: SANS, borderRadius: 999, fontSize: 12,
+            border: `1px solid ${selected.has(b) ? C.gold : C.line}`,
+            background: selected.has(b) ? C.gold : "transparent",
+            color: selected.has(b) ? C.bg : C.dim,
+          }} className="px-3 py-1">{b}</button>
+      ))}
+    </div>
+  );
+}
+
+/* =========================================================================
+   MAIN
+   ========================================================================= */
+export default function WatchBI() {
+  const [stage, setStage] = useState("upload"); // upload | map | dash
+  const [datasets, setDatasets] = useState([]);
+  const [err, setErr] = useState("");
+  const fileRef = useRef();
+
+  useEffect(() => {
+    if (document.getElementById("wbi-fonts")) return;
+    const l = document.createElement("link");
+    l.id = "wbi-fonts"; l.rel = "stylesheet";
+    l.href = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=DM+Sans:wght@400;500;600&display=swap";
+    document.head.appendChild(l);
+  }, []);
+
+  async function handleFiles(fileList) {
+    setErr("");
+    try {
+      const next = [];
+      for (const file of Array.from(fileList)) {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array", cellDates: true });
+        for (const sheetName of wb.SheetNames) {
+          const ws = wb.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+          if (!rows.length) continue;
+          const columns = Object.keys(rows[0]);
+          if (columns.length < 2) continue;
+          const role = guessRole(columns);
+          next.push({
+            id: file.name + "::" + sheetName + "::" + Math.random().toString(36).slice(2, 6),
+            fileName: file.name, sheetName, columns, rows,
+            role, mapping: role === "ignore" ? {} : autoMap(role, columns),
+          });
+        }
+      }
+      if (!next.length) { setErr("No readable sheets found in that file."); return; }
+      setDatasets((d) => [...d, ...next]);
+      setStage("map");
+    } catch (e) {
+      setErr("Couldn't read that file: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  function setRole(id, role) {
+    setDatasets((ds) => ds.map((d) =>
+      d.id === id ? { ...d, role, mapping: role === "ignore" ? {} : autoMap(role, d.columns) } : d));
+  }
+  function setMap(id, field, col) {
+    setDatasets((ds) => ds.map((d) =>
+      d.id === id ? { ...d, mapping: { ...d.mapping, [field]: col || undefined } } : d));
+  }
+  function removeDs(id) { setDatasets((ds) => ds.filter((d) => d.id !== id)); }
+
+  const active = datasets.filter((d) => d.role !== "ignore");
+  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active) : null), [stage, datasets]);
+
+  return (
+    <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
+      {/* header */}
+      <div style={{ borderBottom: `1px solid ${C.line}` }} className="px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Watch size={26} style={{ color: C.gold }} />
+          <div>
+            <div style={{ fontFamily: SERIF, color: C.text }} className="text-xl leading-none">Horometrics</div>
+            <div style={{ color: C.faint }} className="text-xs tracking-wide">inventory & sales intelligence</div>
+          </div>
+        </div>
+        {stage === "dash" && (
+          <button onClick={() => { setDatasets([]); setStage("upload"); }}
+            style={{ color: C.dim, border: `1px solid ${C.line}`, borderRadius: 10, fontFamily: SANS }}
+            className="text-xs px-3 py-2 hover:opacity-80">Load different data</button>
+        )}
+      </div>
+
+      {stage === "upload" && <UploadView fileRef={fileRef} onFiles={handleFiles} err={err} />}
+      {stage === "map" && (
+        <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
+          onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
+      )}
+      {stage === "dash" && metrics && <Dashboard M={metrics} />}
+    </div>
+  );
+}
+
+/* ---------- upload ---------- */
+function UploadView({ fileRef, onFiles, err }) {
+  const [drag, setDrag] = useState(false);
+  return (
+    <div className="p-8 flex flex-col items-center" style={{ minHeight: 480, justifyContent: "center" }}>
+      <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
+        onChange={(e) => e.target.files.length && onFiles(e.target.files)} />
+      {err && (
+        <div style={{ background: "#3a201b", border: `1px solid ${C.red}`, color: C.text, borderRadius: 10, maxWidth: 560 }}
+          className="px-4 py-3 mb-4 text-sm flex items-center gap-2 w-full">
+          <AlertTriangle size={16} style={{ color: C.red }} /> {err}
+        </div>
+      )}
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={(e) => { e.preventDefault(); setDrag(false); e.dataTransfer.files.length && onFiles(e.dataTransfer.files); }}
+        onClick={() => fileRef.current?.click()}
+        style={{
+          border: `1.5px dashed ${drag ? C.gold : C.line}`, borderRadius: 18,
+          background: drag ? C.panel2 : C.panel, width: "100%", maxWidth: 560, cursor: "pointer",
+        }}
+        className="p-12 flex flex-col items-center gap-4 transition-colors">
+        <Upload size={40} style={{ color: C.gold }} />
+        <div style={{ fontFamily: SERIF }} className="text-2xl">Drop your spreadsheets</div>
+        <div style={{ color: C.dim }} className="text-sm text-center max-w-sm">
+          Inventory export, sales export, or both. Excel or CSV. Nothing is uploaded anywhere — it's read in your browser.
+        </div>
+        <div style={{ color: C.faint }} className="text-xs">.xlsx · .xls · .csv · multiple files & sheets supported</div>
+      </div>
+      <div style={{ color: C.faint }} className="text-xs mt-6 max-w-md text-center">
+        The tool detects your columns and lets you confirm the mapping, so it works on any dealer's export — not just one fixed format.
+      </div>
+    </div>
+  );
+}
+
+/* ---------- mapping ---------- */
+function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
+  const usable = datasets.filter((d) => d.role !== "ignore");
+  const canBuild = usable.length > 0 && usable.every((d) => {
+    if (d.role === "inventory") return d.mapping.brand || d.mapping.cost;
+    if (d.role === "sales") return d.mapping.saleDate || d.mapping.salePrice;
+    return true;
+  });
+  return (
+    <div className="p-6">
+      <div className="flex items-baseline justify-between mb-4">
+        <h2 style={{ fontFamily: SERIF }} className="text-2xl">Confirm the columns</h2>
+        <button onClick={onAdd} style={{ color: C.dim, border: `1px solid ${C.line}`, borderRadius: 10 }}
+          className="text-xs px-3 py-2">+ add file</button>
+      </div>
+      <p style={{ color: C.dim }} className="text-sm mb-5 max-w-2xl">
+        I auto-detected each sheet. Set what it is, fix any mapping that's off, and ignore anything you don't need (like a yearly summary tab).
+      </p>
+      <div className="flex flex-col gap-4">
+        {datasets.map((d) => (
+          <div key={d.id} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14 }} className="p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet size={18} style={{ color: C.gold }} />
+                <span style={{ fontFamily: SANS }} className="text-sm">{d.fileName}</span>
+                <span style={{ color: C.faint }} className="text-xs">· {d.sheetName} · {d.rows.length} rows</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {["inventory", "sales", "ignore"].map((r) => (
+                  <button key={r} onClick={() => setRole(d.id, r)}
+                    style={{
+                      fontFamily: SANS, borderRadius: 8,
+                      border: `1px solid ${d.role === r ? C.gold : C.line}`,
+                      background: d.role === r ? C.gold : "transparent",
+                      color: d.role === r ? C.bg : C.dim,
+                    }} className="text-xs px-3 py-1 capitalize">{r}</button>
+                ))}
+                <button onClick={() => removeDs(d.id)} style={{ color: C.faint }} className="ml-1"><Trash2 size={15} /></button>
+              </div>
+            </div>
+            {d.role !== "ignore" && (
+              <div className="grid grid-cols-1 gap-2" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))" }}>
+                {FIELDS[d.role].map(([field, label]) => (
+                  <div key={field} className="flex flex-col gap-1">
+                    <label style={{ color: C.dim, fontFamily: SANS }} className="text-xs">{label}</label>
+                    <select value={d.mapping[field] || ""} onChange={(e) => setMap(d.id, field, e.target.value)}
+                      style={{ background: C.panel2, color: C.text, border: `1px solid ${C.line}`, borderRadius: 8, fontFamily: SANS }}
+                      className="text-xs px-2 py-2">
+                      <option value="">— not mapped —</option>
+                      {d.columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="mt-6 flex items-center gap-4">
+        <button disabled={!canBuild} onClick={onBuild}
+          style={{
+            background: canBuild ? C.gold : C.line, color: canBuild ? C.bg : C.faint,
+            borderRadius: 12, fontFamily: SANS, cursor: canBuild ? "pointer" : "default",
+          }} className="px-6 py-3 text-sm flex items-center gap-2 font-medium">
+          Build dashboard <ArrowRight size={16} />
+        </button>
+        {!canBuild && <span style={{ color: C.faint }} className="text-xs">Map at least cost/brand for inventory or a sale date/price for sales.</span>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- dashboard ---------- */
+function Dashboard({ M }) {
+  const [tab, setTab] = useState(M.hasInv ? "inventory" : "sales");
+  const tabs = [
+    M.hasInv && ["inventory", "Inventory", Boxes],
+    M.hasSales && ["sales", "Sales", TrendingUp],
+    M.hasSales && ["buy", "Buy Signals", Sparkles],
+  ].filter(Boolean);
+
+  // brand filter shared across Sales & Buy tabs
+  const allBrands = useMemo(() => {
+    const s = new Set();
+    (M.salesByBrand || []).forEach((b) => s.add(b.brand));
+    (M.invByBrand || []).forEach((b) => s.add(b.brand));
+    return Array.from(s).sort();
+  }, [M]);
+  const [selectedBrands, setSelectedBrands] = useState(new Set(allBrands));
+  useEffect(() => { setSelectedBrands(new Set(allBrands)); }, [allBrands.join("|")]);
+  const toggleBrand = (b) => setSelectedBrands((prev) => {
+    const allSelected = prev.size === allBrands.length;
+    // clicking a chip while "all" is active isolates that brand
+    if (allSelected) return new Set([b]);
+    const next = new Set(prev);
+    next.has(b) ? next.delete(b) : next.add(b);
+    return next.size ? next : new Set(allBrands); // never allow empty -> show all
+  });
+  const selectAllBrands = () => setSelectedBrands(new Set(allBrands));
+  const brandFilter = selectedBrands.size === allBrands.length ? null : selectedBrands;
+  const [filtersOpen, setFiltersOpen] = useState(true);
+
+  return (
+    <div className="flex flex-col lg:flex-row" style={{ minHeight: 520 }}>
+      <div className="flex-1 p-6">
+        <div className="flex gap-1 mb-5">
+          {tabs.map(([k, label, Icon]) => (
+            <button key={k} onClick={() => setTab(k)}
+              style={{
+                fontFamily: SANS, borderRadius: 10,
+                background: tab === k ? C.panel2 : "transparent",
+                color: tab === k ? C.gold : C.dim,
+                border: `1px solid ${tab === k ? C.line : "transparent"}`,
+              }} className="px-4 py-2 text-sm flex items-center gap-2">
+              <Icon size={15} /> {label}
+            </button>
+          ))}
+        </div>
+        {allBrands.length > 1 && (
+          <div className="mb-3">
+            <button onClick={() => setFiltersOpen((o) => !o)}
+              style={{
+                fontFamily: SANS, fontSize: 11, color: C.dim,
+                border: `1px solid ${C.line}`, borderRadius: 8, background: "transparent",
+              }} className="px-3 py-1.5 flex items-center gap-2">
+              <span style={{ display: "inline-block", transform: filtersOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
+              Filters
+              {brandFilter ? (
+                <span style={{ color: C.gold }}>({selectedBrands.size}/{allBrands.length} brands)</span>
+              ) : null}
+            </button>
+            {filtersOpen && (
+              <div className="mt-2">
+                <BrandFilter brands={allBrands} selected={selectedBrands} onToggle={toggleBrand} onAll={selectAllBrands} />
+              </div>
+            )}
+          </div>
+        )}
+        {tab === "inventory" && <InventoryTab M={M} brandFilter={brandFilter} />}
+        {tab === "sales" && <SalesTab M={M} brandFilter={brandFilter} />}
+        {tab === "buy" && <BuyTab M={M} brandFilter={brandFilter} />}
+      </div>
+      <ChatPanel M={M} />
+    </div>
+  );
+}
+
+/* keep only rows whose brand is in the filter set (null filter = no filtering) */
+function applyBrandFilter(rows, brandFilter) {
+  if (!brandFilter || !rows) return rows || [];
+  return rows.filter((r) => brandFilter.has(r.brand));
+}
+
+/* dynamic height: perRow px per bar + 48px for axes, minimum min px */
+function barH(n, perRow = 38, min = 180) {
+  return Math.max(min, n * perRow + 48);
+}
+/* dynamic YAxis width: base on longest label */
+function yAxisW(items, key = "brand", base = 80) {
+  if (!items || !items.length) return base;
+  const longest = Math.max(...items.map((x) => String(x[key] || "").length));
+  return Math.min(Math.max(base, longest * 7), 210);
+}
+
+function SectionLabel({ children }) {
+  return (
+    <div style={{ color: C.gold, fontFamily: SANS, letterSpacing: ".1em", fontSize: 11, textTransform: "uppercase", fontWeight: 600, marginBottom: 12, marginTop: 4 }}>
+      {children}
+    </div>
+  );
+}
+
+function InventoryTab({ M, brandFilter }) {
+  const fByBrand = applyBrandFilter(M.invByBrand, brandFilter);
+  const fByLine = applyBrandFilter(M.invByLine, brandFilter);
+  const fProjByBrand = applyBrandFilter(M.projByBrand, brandFilter);
+  const fProjByModel = applyBrandFilter(M.projByModel, brandFilter);
+  const fInvCount = fByBrand.reduce((s, r) => s + (r.count || 0), 0);
+  const fInvCost = fByBrand.reduce((s, r) => s + (r.cost || 0), 0);
+  const fProjProfit = fProjByModel.reduce((s, r) => s + (r.profit || 0), 0);
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* ── KPIs ── */}
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
+        <Stat label="Items in stock" value={brandFilter ? fInvCount : M.invCount} />
+        <Stat label="Capital tied up" value={fmtMoney(brandFilter ? fInvCost : M.invCost)} />
+        <Stat label="Brands" value={brandFilter ? fByBrand.length : M.invBrandCount} />
+        <Stat label="Aged 91+ days" value={fmtMoney(M.agedValue)} sub={brandFilter ? "all brands · not filterable" : "cost sitting on the shelf"} />
+        {M.projItems > 0 && <Stat label="Projected profit" value={fmtMoney(brandFilter ? fProjProfit : M.projProfit)} sub={`${fProjByModel.length} priced items`} />}
+      </div>
+
+      {/* ── By Brand ── */}
+      <Panel title="Inventory by brand" note="cost on the shelf">
+        <ResponsiveContainer width="100%" height={barH(fByBrand.length)}>
+          <BarChart data={fByBrand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+            <CartesianGrid stroke={C.line} horizontal={false} />
+            <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+            <YAxis type="category" dataKey="brand" width={yAxisW(fByBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+            <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+            <Bar dataKey="cost" name="Cost" fill={C.gold} radius={[0, 4, 4, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      {/* ── By Product Line ── */}
+      <Panel title="By product line" note="Rolex · Patek Philippe · Audemars Piguet · Omega">
+        {fByLine.length === 0
+          ? <Locked msg="No items matched a known product line for the four focus brands." />
+          : (<>
+            <ResponsiveContainer width="100%" height={barH(fByLine.length, 34, 160)}>
+              <BarChart data={fByLine} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                <CartesianGrid stroke={C.line} horizontal={false} />
+                <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                <YAxis type="category" dataKey="line" width={yAxisW(fByLine, "line")} tick={{ fill: C.dim, fontSize: 11 }} />
+                <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+                <Bar dataKey="cost" name="Cost" fill={C.blue} radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <div className="mt-3">
+              <ItemTable rows={fByLine} cols={[["brand","Brand"],["line","Line"],["count","Items"],["cost","Cost",fmtMoney]]} />
+            </div>
+          </>)}
+      </Panel>
+
+      {/* ── Aging ── */}
+      <Panel title="Age of inventory" note="days stock held">
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={M.aging} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+              <CartesianGrid stroke={C.line} vertical={false} />
+              <XAxis dataKey="label" tick={{ fill: C.dim, fontSize: 11 }} />
+              <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
+              <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+              <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]}>
+                {M.aging.map((b, i) => <Cell key={i} fill={b.lo >= 91 ? C.red : b.lo >= 61 ? "#c8863a" : C.gold} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <div>
+            <ItemTable rows={M.aging.map(b => ({ ...b, label: b.label + " days" }))}
+              cols={[["label","Age bucket"],["count","Items"],["cost","Cost tied up",fmtMoney]]} />
+            {M.agedValue > 0 && (
+              <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginTop: 10 }}>
+                ⚠ {fmtMoney(M.agedValue)} sitting 91+ days
+              </div>
+            )}
+          </div>
+        </div>
+      </Panel>
+
+      {/* ── Projected Profit ── */}
+      {M.projItems === 0
+        ? <Panel title="Projected profit"><Locked msg="No items have a target wholesale price yet. Add 'Target Wholesale Price' to your inventory export." /></Panel>
+        : fProjByModel.length === 0
+        ? <Panel title="Projected profit"><Locked msg="No priced items match the current brand filter." /></Panel>
+        : (<>
+          <Panel title="Projected profit by brand" note={`${fProjByModel.length} of ${M.projItems} priced items`}>
+            <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(fProjProfit)} total</div>
+            <ResponsiveContainer width="100%" height={barH(fProjByBrand.length, 38, 140)}>
+              <BarChart data={fProjByBrand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                <YAxis type="category" dataKey="brand" width={yAxisW(fProjByBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+                <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+                <Bar dataKey="profit" name="Projected profit" fill={C.green} radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          <Panel title="Projected profit by model" note="based on target wholesale price">
+            <ItemTable rows={fProjByModel.slice(0, 30)} cols={[
+              ["brand","Brand"],["model","Model"],["count","Items"],
+              ["profit","Proj. Profit",fmtMoney],
+              ["marginPct","Margin %",(v) => fmtPct(v)],
+            ]} />
+          </Panel>
+        </>)}
+    </div>
+  );
+}
+
+function SalesTab({ M, brandFilter }) {
+  const needsBrand = !M.salesHasBrand;
+  const fBrand = applyBrandFilter(M.salesByBrand, brandFilter);
+  const fLine = applyBrandFilter(M.salesByLine, brandFilter);
+  const fModel = applyBrandFilter(M.salesByModel, brandFilter);
+  const fVelocity = applyBrandFilter(M.byVelocity, brandFilter);
+  return (
+    <div className="flex flex-col gap-5">
+      {/* ── KPIs ── */}
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))" }}>
+        <Stat label="Units sold" value={M.salesUnits} />
+        <Stat label="Total profit $" value={fmtMoney(M.salesProfit)} />
+        <Stat label="Revenue" value={fmtMoney(M.salesRevenue)} />
+        <Stat label="Median margin %" value={fmtPct(M.medianMargin)} sub="on cost" />
+        <Stat label="Median days to sell" value={M.medianDays ?? "--"} sub={M.meanDays ? `avg ${Math.round(M.meanDays)} days` : ""} />
+      </div>
+
+      {/* ── Over time ── */}
+      <Panel title="Sales over time" note="units & profit by month">
+        <ResponsiveContainer width="100%" height={270}>
+          <LineChart data={M.monthly} margin={{ top: 4, right: 16, bottom: 20, left: 0 }}>
+            <CartesianGrid stroke={C.line} vertical={false} />
+            <XAxis dataKey="month" tick={{ fill: C.faint, fontSize: 10 }}
+              angle={M.monthly.length > 12 ? -40 : 0}
+              textAnchor={M.monthly.length > 12 ? "end" : "middle"}
+              interval={M.monthly.length > 24 ? "preserveStartEnd" : 0}
+              height={M.monthly.length > 12 ? 48 : 24} />
+            <YAxis yAxisId="l" tick={{ fill: C.faint, fontSize: 11 }} />
+            <YAxis yAxisId="r" orientation="right" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+            <Tooltip {...chartTip} formatter={(v, n) => n === "Profit $" ? fmtMoney(v) : v} />
+            <Legend wrapperStyle={{ fontFamily: SANS, fontSize: 12, paddingTop: 8 }}
+              formatter={(val) => <span style={{ color: val === "Units" ? C.gold : C.green }}>{val}</span>} />
+            <Line yAxisId="l" type="monotone" dataKey="units" name="Units" stroke={C.gold} strokeWidth={2} dot={M.monthly.length < 30} />
+            <Line yAxisId="r" type="monotone" dataKey="profit" name="Profit $" stroke={C.green} strokeWidth={2} dot={M.monthly.length < 30} />
+          </LineChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      {/* ── By Brand ── */}
+      <Panel title="By brand" note={needsBrand ? "needs brand column on sales" : "profit $ and margin %"}>
+        {needsBrand
+          ? <Locked msg="Add a brand or model/reference column to your sales export and this section lights up." />
+          : (<>
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+              <div>
+                <SectionLabel>Profit $</SectionLabel>
+                <ResponsiveContainer width="100%" height={barH(fBrand.length, 36, 140)}>
+                  <BarChart data={fBrand} layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                    <CartesianGrid stroke={C.line} horizontal={false} />
+                    <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                    <YAxis type="category" dataKey="brand" width={yAxisW(fBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+                    <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+                    <Bar dataKey="profit" name="Profit" fill={C.green} radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div>
+                <SectionLabel>Margin %</SectionLabel>
+                <ResponsiveContainer width="100%" height={barH(fBrand.length, 36, 140)}>
+                  <BarChart data={[...fBrand].sort((a,b) => (b.profitPct||0)-(a.profitPct||0))}
+                    layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                    <CartesianGrid stroke={C.line} horizontal={false} />
+                    <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={(v) => v.toFixed(0) + "%"} />
+                    <YAxis type="category" dataKey="brand" width={yAxisW(fBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+                    <Tooltip {...chartTip} formatter={(v) => fmtPct(v)} />
+                    <Bar dataKey="profitPct" name="Margin %" fill={C.blue} radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <div className="mt-3">
+              <ItemTable rows={fBrand} cols={[
+                ["brand","Brand"],["units","Units"],["profit","Profit $",fmtMoney],
+                ["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+              ]} />
+            </div>
+          </>)}
+      </Panel>
+
+      {/* ── By Product Line ── */}
+      <Panel title="By product line" note={needsBrand ? "needs brand column" : "Rolex · Patek · AP · Omega"}>
+        {needsBrand
+          ? <Locked msg="Requires brand and model columns on your sales export." />
+          : (fLine.length > 0
+            ? (<>
+              <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+                <div>
+                  <SectionLabel>Profit $ by line</SectionLabel>
+                  <ResponsiveContainer width="100%" height={barH(fLine.length, 34, 140)}>
+                    <BarChart data={fLine} layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                      <CartesianGrid stroke={C.line} horizontal={false} />
+                      <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                      <YAxis type="category" dataKey="line" width={yAxisW(fLine, "line", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+                      <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+                      <Bar dataKey="profit" name="Profit" fill={C.gold} radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div>
+                  <SectionLabel>Velocity by line (median days)</SectionLabel>
+                  <ResponsiveContainer width="100%" height={barH(fLine.length, 34, 140)}>
+                    <BarChart data={[...fLine].filter(x=>x.medianDays!=null).sort((a,b)=>a.medianDays-b.medianDays)}
+                      layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                      <CartesianGrid stroke={C.line} horizontal={false} />
+                      <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} unit=" d" />
+                      <YAxis type="category" dataKey="line" width={yAxisW(fLine, "line", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+                      <Tooltip {...chartTip} formatter={(v) => v + " days"} />
+                      <Bar dataKey="medianDays" name="Median days to sell" fill={C.blue} radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+              <div className="mt-3">
+                <ItemTable rows={fLine} cols={[
+                  ["brand","Brand"],["line","Line"],["units","Units"],
+                  ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+                  ["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />],
+                ]} />
+              </div>
+            </>)
+            : <Locked msg="No product-line matches found. Lines are detected from Rolex, Patek Philippe, AP, and Omega model names." />
+          )}
+      </Panel>
+
+      {/* ── By Model ── */}
+      <Panel title="By model number" note={needsBrand ? "needs model column" : `${fModel.length} models`}>
+        {needsBrand
+          ? <Locked msg="Add a model/reference column to your sales export." />
+          : (<>
+            <ItemTable rows={fModel.slice(0, 40)} cols={[
+              ["brand","Brand"],["model","Model / Ref #"],["units","Units sold"],
+              ["profit","Total profit $",fmtMoney],["avgProfit","Avg profit $",fmtMoney],
+              ["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+              ["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />],
+            ]} />
+          </>)}
+      </Panel>
+
+      {/* ── Velocity ── */}
+      <Panel title="Velocity — how quickly do we sell?" note="median days to sell">
+        {needsBrand
+          ? <Locked msg="Requires brand and model columns on sales." />
+          : (<>
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+              <div>
+                <SectionLabel>By brand (median days)</SectionLabel>
+                <ResponsiveContainer width="100%" height={barH(fBrand.filter(x=>x.medianDays!=null).length, 36, 120)}>
+                  <BarChart
+                    data={[...fBrand].filter(x=>x.medianDays!=null).sort((a,b)=>a.medianDays-b.medianDays)}
+                    layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                    <CartesianGrid stroke={C.line} horizontal={false} />
+                    <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} unit=" d" />
+                    <YAxis type="category" dataKey="brand" width={yAxisW(fBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+                    <Tooltip {...chartTip} formatter={(v) => v + " days"} />
+                    <Bar dataKey="medianDays" name="Median days" fill={C.gold} radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div>
+                <SectionLabel>Top 15 fastest models</SectionLabel>
+                <ItemTable rows={fVelocity.slice(0, 15)} cols={[
+                  ["brand","Brand"],["model","Model"],["medianDays","Days"],["units","Units"],
+                ]} />
+              </div>
+            </div>
+          </>)}
+      </Panel>
+
+      {/* ── Inventory type breakdown ── */}
+      <Panel title="By inventory type">
+        <ItemTable rows={M.salesByType} cols={[["type","Type"],["units","Units"],["profit","Profit $",fmtMoney]]} />
+      </Panel>
+    </div>
+  );
+}
+
+function QuestionCard({ num, question, children }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14 }} className="p-4">
+      <div className="flex items-start gap-3 mb-3">
+        <div style={{
+          background: C.gold, color: C.bg, fontFamily: SANS, fontWeight: 700,
+          borderRadius: "50%", width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 13, flexShrink: 0,
+        }}>{num}</div>
+        <div style={{ color: C.text, fontFamily: SERIF }} className="text-lg leading-snug">{question}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/* generic ranked table for model/line rows */
+function RankTable({ rows, nameKey, showScore }) {
+  const cols = [
+    ["brand","Brand"],
+    [nameKey, nameKey === "model" ? "Model" : "Line"],
+    ["units","Units"],
+    ["profit","Profit $",fmtMoney],
+    ["avgProfit","Avg $",fmtMoney],
+    ["profitPct","Margin %",fmtPct],
+    ["medianDays","Days"],
+    ["stock","Stock",(v) => v == null ? "—" : v === 0 ? "⚡ OUT" : String(v)],
+  ];
+  if (showScore) cols.push(["buyScore","Score",(v) => v?.toFixed(3)]);
+  cols.push(["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />]);
+  return <ItemTable rows={rows} cols={cols} />;
+}
+
+/* Model | Product Line toggle */
+function GranularityToggle({ value, onChange }) {
+  return (
+    <div className="flex gap-1 mb-3">
+      {["model","line"].map((g) => (
+        <button key={g} onClick={() => onChange(g)}
+          style={{
+            fontFamily: SANS, borderRadius: 8, fontSize: 12,
+            border: `1px solid ${value === g ? C.gold : C.line}`,
+            background: value === g ? C.gold : "transparent",
+            color: value === g ? C.bg : C.dim,
+          }} className="px-3 py-1">
+          {g === "model" ? "By model" : "By product line"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BuyTab({ M, brandFilter }) {
+  const [g1, setG1] = useState("model"); // fastest
+  const [g2, setG2] = useState("model"); // best profit
+  const [g3, setG3] = useState("model"); // best score
+  const [g4, setG4] = useState("model"); // health by velocity
+  const [g5, setG5] = useState("model"); // health by score
+
+  if (!M.salesHasBrand)
+    return (
+      <div className="flex flex-col gap-4">
+        <Locked msg="Everything below needs brand + model/reference on your sales export. Add those columns and this tab fills in completely." />
+        <Panel title="What this tab answers">
+          <ul style={{ color: C.dim, fontFamily: SANS }} className="text-sm flex flex-col gap-2 mt-1">
+            <li><span style={{ color: C.gold }}>1.</span> What is our highest velocity, highest profit product — and are we out?</li>
+            <li><span style={{ color: C.gold }}>2.</span> What products should I buy?</li>
+            <li><span style={{ color: C.gold }}>3.</span> Rank products by velocity and profit combined.</li>
+            <li><span style={{ color: C.gold }}>4.</span> Most frequently sold items — by model and by product line.</li>
+          </ul>
+        </Panel>
+      </div>
+    );
+
+  const ranking = applyBrandFilter(M.ranking, brandFilter);
+  const byVelocity = applyBrandFilter(M.byVelocity, brandFilter);
+  const top = ranking[0];
+  const topVel = byVelocity[0];
+
+  const fastest = { model: applyBrandFilter(M.fastestModels, brandFilter), line: applyBrandFilter(M.fastestLines, brandFilter) };
+  const bestProfit = { model: applyBrandFilter(M.bestProfitModels, brandFilter), line: applyBrandFilter(M.bestProfitLines, brandFilter) };
+  const bestScore = { model: applyBrandFilter(M.bestScoreModels, brandFilter), line: applyBrandFilter(M.bestScoreLines, brandFilter) };
+  const healthVel = { model: applyBrandFilter(M.healthByVelocityModels, brandFilter), line: applyBrandFilter(M.healthByVelocityLines, brandFilter) };
+  const healthScore = { model: applyBrandFilter(M.healthByScoreModels, brandFilter), line: applyBrandFilter(M.healthByScoreLines, brandFilter) };
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* Q1 */}
+      <QuestionCard num="1" question="What is our highest velocity, highest profit product — and are we out?">
+        {top ? (
+          <div className="flex flex-col gap-3">
+            <div style={{ background: C.panel2, borderRadius: 12 }} className="p-4">
+              <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }} className="mb-1">
+                Top buy signal (velocity + profit + volume)
+              </div>
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <div style={{ fontFamily: SERIF, color: C.gold }} className="text-xl">{top.brand} — {top.model}</div>
+                  <div style={{ color: C.dim, fontFamily: SANS }} className="text-sm mt-1">
+                    {top.units} sold · {fmtMoney(top.avgProfit)} avg profit · {top.medianDays != null ? top.medianDays + " days to sell" : "—"} · {fmtPct(top.profitPct)} margin
+                  </div>
+                </div>
+                <HealthBadge health={top.health || (top.stock === 0 || top.stock == null ? "red" : "green")} weeksOfStock={top.weeksOfStock} />
+              </div>
+            </div>
+            {topVel && topVel.model !== top.model && (
+              <div style={{ background: C.panel2, borderRadius: 12 }} className="p-4">
+                <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }} className="mb-1">
+                  Fastest seller (median days)
+                </div>
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <div style={{ fontFamily: SERIF, color: C.blue }} className="text-xl">{topVel.brand} — {topVel.model}</div>
+                    <div style={{ color: C.dim, fontFamily: SANS }} className="text-sm mt-1">
+                      {topVel.medianDays} days median · {topVel.units} sold · {fmtMoney(topVel.avgProfit)} avg profit
+                    </div>
+                  </div>
+                  <HealthBadge health={topVel.health || (topVel.stock === 0 || topVel.stock == null ? "red" : "green")} weeksOfStock={topVel.weeksOfStock} />
+                </div>
+              </div>
+            )}
+          </div>
+        ) : <Locked msg="No ranked data available." />}
+      </QuestionCard>
+
+      {/* Q2 */}
+      <QuestionCard num="2" question="What products should I buy?">
+        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+          Scored by: velocity (35%) + avg profit (35%) + sales volume (30%). Out-of-stock items get a boost.
+          Stock health = current stock ÷ weekly sell rate (red &lt; 1 week, yellow &lt; 2 weeks).
+        </div>
+        <RankTable rows={ranking.slice(0, 20)} nameKey="model" showScore />
+      </QuestionCard>
+
+      {/* Fastest 10 */}
+      <QuestionCard num="3" question="Fastest 10 watches to sell">
+        <GranularityToggle value={g1} onChange={setG1} />
+        {fastest[g1].length === 0
+          ? <Locked msg="No median-days data available for this view." />
+          : <RankTable rows={fastest[g1]} nameKey={g1} />}
+      </QuestionCard>
+
+      {/* Best 10 by profit */}
+      <QuestionCard num="4" question="Best 10 watches by profit">
+        <GranularityToggle value={g2} onChange={setG2} />
+        {bestProfit[g2].length === 0
+          ? <Locked msg="No profit data available for this view." />
+          : <RankTable rows={bestProfit[g2]} nameKey={g2} />}
+      </QuestionCard>
+
+      {/* Best 10 by score */}
+      <QuestionCard num="5" question="Best 10 watches by score">
+        <GranularityToggle value={g3} onChange={setG3} />
+        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+          Score blends velocity, profit, and volume — boosted when out of stock.
+        </div>
+        {bestScore[g3].length === 0
+          ? <Locked msg="No scored data available for this view." />
+          : <RankTable rows={bestScore[g3]} nameKey={g3} showScore />}
+      </QuestionCard>
+
+      {/* Stock health by velocity */}
+      <QuestionCard num="6" question="Stock health by velocity — what do I need to buy soon?">
+        <GranularityToggle value={g4} onChange={setG4} />
+        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+          Sorted by urgency: weeks of stock left at the current sell rate.
+          <span style={{ color: C.red }}> Red</span> = under 1 week (buy now),
+          <span style={{ color: "#c8863a" }}> yellow</span> = under 2 weeks (buy soon),
+          <span style={{ color: C.green }}> green</span> = healthy.
+        </div>
+        {healthVel[g4].length === 0
+          ? <Locked msg="Not enough sales velocity data to assess stock health for this view." />
+          : <RankTable rows={healthVel[g4].slice(0, 30)} nameKey={g4} />}
+      </QuestionCard>
+
+      {/* Stock health by score */}
+      <QuestionCard num="7" question="Stock health by score">
+        <GranularityToggle value={g5} onChange={setG5} />
+        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+          Same urgency colors, but ordered by buy score within each health tier — your highest-priority restocks float to the top.
+        </div>
+        {healthScore[g5].length === 0
+          ? <Locked msg="Not enough data to assess stock health for this view." />
+          : <RankTable rows={healthScore[g5].slice(0, 30)} nameKey={g5} showScore />}
+      </QuestionCard>
+
+      {/* Q8: most frequently sold */}
+      <QuestionCard num="8" question="Most frequently sold items — by model and by product line">
+        <div className="grid gap-5" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+          <div>
+            <SectionLabel>By model (top 20)</SectionLabel>
+            <ItemTable rows={applyBrandFilter(M.salesByModel, brandFilter).slice(0, 20)} cols={[
+              ["model","Model"],["brand","Brand"],["units","Units"],
+              ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],
+            ]} />
+          </div>
+          <div>
+            <SectionLabel>By product line</SectionLabel>
+            {applyBrandFilter(M.salesByLine, brandFilter).length === 0
+              ? <Locked msg="No product-line matches in your sales data." />
+              : <ItemTable rows={applyBrandFilter(M.salesByLine, brandFilter)} cols={[
+                ["brand","Brand"],["line","Line"],["units","Units"],
+                ["profit","Profit $",fmtMoney],["medianDays","Median days"],
+              ]} />
+            }
+          </div>
+        </div>
+      </QuestionCard>
+
+    </div>
+  );
+}
+
+function ItemTable({ rows, cols }) {
+  return (
+    <div className="overflow-auto">
+      <table className="w-full" style={{ fontFamily: SANS, fontSize: 13 }}>
+        <thead>
+          <tr style={{ color: C.faint }}>
+            {cols.map(([k, label]) => <th key={k} className="text-left py-2 pr-4 font-normal text-xs uppercase tracking-wide">{label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} style={{ borderTop: `1px solid ${C.line}`, color: C.text }}>
+              {cols.map(([k, , fmt]) => (
+                <td key={k} className="py-2 pr-4">{fmt ? fmt(r[k], r) : (r[k] ?? "--")}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ---------- chatbot ---------- */
+function ChatPanel({ M }) {
+  const [msgs, setMsgs] = useState([
+    { role: "assistant", text: "Ask me about your inventory and sales. Try: \"What should I buy?\" or \"Rank by velocity and profit.\"" },
+  ]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scrollRef = useRef();
+  useEffect(() => { scrollRef.current?.scrollTo(0, 1e9); }, [msgs, busy]);
+
+  async function send() {
+    const q = input.trim();
+    if (!q || busy) return;
+    const history = [...msgs, { role: "user", text: q }];
+    setMsgs(history); setInput(""); setBusy(true);
+    const summary = JSON.stringify(metricsForChat(M));
+    const instructions =
+      "You are a sharp analyst for a luxury watch dealership. Answer ONLY from the METRICS JSON below. " +
+      "Use concrete numbers. Be concise and direct, no filler. If a question needs data marked UNAVAILABLE, " +
+      "say so plainly and name the missing field instead of guessing. Never invent figures not in the JSON.";
+    // Prior turns as plain text (skip the seeded greeting at index 0) so the
+    // request is always a single, valid user message.
+    const transcript = msgs
+      .filter((_, i) => i !== 0)
+      .map((m) => (m.role === "user" ? "Q: " : "A: ") + m.text)
+      .join("\n");
+    const userContent =
+      instructions +
+      "\n\nMETRICS JSON:\n" + summary +
+      (transcript ? "\n\nEarlier in this chat:\n" + transcript : "") +
+      "\n\nQuestion: " + q;
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userContent }),
+      });
+      const data = await res.json();
+      const text = data.text || "";
+      setMsgs((m) => [...m, { role: "assistant", text: text || "No response from the model." }]);
+    } catch (e) {
+      setMsgs((m) => [...m, { role: "assistant", text: "Couldn't reach the model just now. The dashboard numbers are still live." }]);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{
+      background: C.panel, borderLeft: `1px solid ${C.line}`,
+      width: 380, minWidth: 300, flexShrink: 0,
+    }} className="flex flex-col">
+      <div style={{ borderBottom: `1px solid ${C.line}` }} className="px-4 py-3 flex items-center gap-2">
+        <Sparkles size={16} style={{ color: C.gold }} />
+        <span style={{ fontFamily: SERIF }} className="text-base">Ask the data</span>
+      </div>
+      <div ref={scrollRef} className="flex-1 overflow-auto p-4 flex flex-col gap-3"
+        style={{ minHeight: 320, maxHeight: "calc(100vh - 180px)" }}>
+        {msgs.map((m, i) => (
+          <div key={i} style={{
+            alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+            background: m.role === "user" ? C.gold : C.panel2,
+            color: m.role === "user" ? C.bg : C.text,
+            borderRadius: 12, fontFamily: SANS, whiteSpace: "pre-wrap", maxWidth: "92%",
+            lineHeight: 1.55,
+          }} className="px-3 py-2 text-sm">{m.text}</div>
+        ))}
+        {busy && (
+          <div style={{ color: C.faint, fontFamily: SANS, fontStyle: "italic" }} className="text-sm">
+            thinking…
+          </div>
+        )}
+      </div>
+      <div style={{ borderTop: `1px solid ${C.line}` }} className="p-3 flex gap-2">
+        <input value={input} onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && send()}
+          placeholder="Ask about velocity, profit, what to buy…"
+          style={{ background: C.panel2, color: C.text, border: `1px solid ${C.line}`, borderRadius: 10, fontFamily: SANS }}
+          className="flex-1 text-sm px-3 py-2 outline-none" />
+        <button onClick={send} disabled={busy}
+          style={{
+            background: busy ? C.line : C.gold,
+            color: busy ? C.faint : C.bg,
+            borderRadius: 10, transition: "background .2s",
+          }} className="px-3 py-2">
+          <Send size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
