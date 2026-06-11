@@ -687,8 +687,9 @@ function useChipFilter(allItems) {
     return next.size ? next : new Set(allItems);
   });
   const selectAll = () => setSelected(new Set(allItems));
+  const isolate = (item) => setSelected(new Set([item]));
   const filterSet = selected.size === allItems.length ? null : selected;
-  return [selected, toggle, selectAll, filterSet];
+  return [selected, toggle, selectAll, filterSet, isolate];
 }
 
 /* =========================================================================
@@ -914,10 +915,18 @@ function Dashboard({ M, dateRange, setDateRange }) {
   const allHealth = useMemo(() => ["red", "yellow", "green"], []);
 
   const [selectedBrands, toggleBrand, selectAllBrands, brandFilterSet] = useChipFilter(allBrands);
-  const [selectedLines, toggleLine, selectAllLines, lineFilterSet] = useChipFilter(allLines);
+  const [selectedLines, toggleLine, selectAllLines, lineFilterSet, isolateLine] = useChipFilter(allLines);
   const [selectedHealth, toggleHealth, selectAllHealth, healthFilterSet] = useChipFilter(allHealth);
   const [stockFilter, setStockFilter] = useState("all");
   const [filtersOpen, setFiltersOpen] = useState(true);
+
+  // drill down: clicking a product line isolates it in the Line filter and
+  // opens the filter bar so the model-level breakdown below updates to match.
+  const onSelectLine = (line) => {
+    if (!line) return;
+    isolateLine(line);
+    setFiltersOpen(true);
+  };
 
   const filters = {
     brands: brandFilterSet,
@@ -974,8 +983,8 @@ function Dashboard({ M, dateRange, setDateRange }) {
           </div>
         )}
         {tab === "inventory" && <InventoryTab M={M} filters={filters} />}
-        {tab === "sales" && <SalesTab M={M} filters={filters} />}
-        {tab === "buy" && <BuyTab M={M} filters={filters} />}
+        {tab === "sales" && <SalesTab M={M} filters={filters} onSelectLine={onSelectLine} />}
+        {tab === "buy" && <BuyTab M={M} filters={filters} onSelectLine={onSelectLine} />}
       </div>
       <ChatPanel M={M} />
     </div>
@@ -983,15 +992,22 @@ function Dashboard({ M, dateRange, setDateRange }) {
 }
 
 /* apply the shared brand / line / health / stock filters to a metrics array.
-   each check is skipped if the row doesn't carry that field (e.g. brand-only
-   aggregates have no `.line`/`.health`/`.stock`, so those filters are a no-op). */
+   a check is skipped entirely if the row's dataset doesn't carry that field at
+   all (e.g. brand-only aggregates have no `.line`/`.health`/`.stock` key, so
+   those filters are a no-op there). but if the field DOES exist on the row
+   (even as `null`, e.g. an item with no recognized product line / no health
+   data), an active filter excludes it — null can't match any selected chip. */
 function applyFilters(rows, filters) {
   if (!rows) return [];
   if (!filters) return rows;
   return rows.filter((r) => {
     if (filters.brands && !filters.brands.has(r.brand)) return false;
-    if (filters.lines && r.line != null && !filters.lines.has(r.line)) return false;
-    if (filters.health && r.health != null && !filters.health.has(r.health)) return false;
+    if (filters.lines && "line" in r) {
+      if (r.line == null || !filters.lines.has(r.line)) return false;
+    }
+    if (filters.health && "health" in r) {
+      if (r.health == null || !filters.health.has(r.health)) return false;
+    }
     if (filters.stock === "in" && r.stock === 0) return false;
     if (filters.stock === "out" && !(r.stock === 0)) return false;
     return true;
@@ -1127,7 +1143,7 @@ function InventoryTab({ M, filters }) {
   );
 }
 
-function SalesTab({ M, filters }) {
+function SalesTab({ M, filters, onSelectLine }) {
   const needsBrand = !M.salesHasBrand;
   const fBrand = applyFilters(M.salesByBrand, filters);
   const fLine = applyFilters(M.salesByLine, filters);
@@ -1240,7 +1256,10 @@ function SalesTab({ M, filters }) {
                 </div>
               </div>
               <div className="mt-3">
-                <ItemTable rows={fLine} cols={[
+                <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">
+                  Click a row to see its model breakdown below
+                </div>
+                <ItemTable rows={fLine} onRowClick={(r) => onSelectLine?.(r.line)} cols={[
                   ["brand","Brand"],["line","Line"],["units","Units"],
                   ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],["medianDays","Median days"],
                   ["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />],
@@ -1256,6 +1275,13 @@ function SalesTab({ M, filters }) {
         {needsBrand
           ? <Locked msg="Add a model/reference column to your sales export." />
           : (<>
+            {filters.lines && (
+              <div className="mb-2 flex items-center gap-2 flex-wrap">
+                <span style={{ color: C.gold, fontFamily: SANS, fontSize: 12 }}>
+                  Showing models for: {Array.from(filters.lines).join(", ")}
+                </span>
+              </div>
+            )}
             <ItemTable rows={fModel.slice(0, 40)} cols={[
               ["brand","Brand"],["model","Model / Ref #"],["units","Units sold"],
               ["profit","Total profit $",fmtMoney],["avgProfit","Avg profit $",fmtMoney],
@@ -1320,7 +1346,7 @@ function QuestionCard({ num, question, children }) {
 }
 
 /* generic ranked table for model/line rows */
-function RankTable({ rows, nameKey, showScore }) {
+function RankTable({ rows, nameKey, showScore, onSelectLine }) {
   const cols = [
     ["brand","Brand"],
     [nameKey, nameKey === "model" ? "Model" : "Line"],
@@ -1333,7 +1359,8 @@ function RankTable({ rows, nameKey, showScore }) {
   ];
   if (showScore) cols.push(["buyScore","Score",(v) => v?.toFixed(3)]);
   cols.push(["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />]);
-  return <ItemTable rows={rows} cols={cols} />;
+  const onRowClick = nameKey === "line" && onSelectLine ? (r) => onSelectLine(r.line) : undefined;
+  return <ItemTable rows={rows} cols={cols} onRowClick={onRowClick} />;
 }
 
 /* Model | Product Line toggle */
@@ -1355,7 +1382,7 @@ function GranularityToggle({ value, onChange }) {
   );
 }
 
-function BuyTab({ M, filters }) {
+function BuyTab({ M, filters, onSelectLine }) {
   const [g1, setG1] = useState("model"); // fastest
   const [g2, setG2] = useState("model"); // best profit
   const [g3, setG3] = useState("model"); // best score
@@ -1443,7 +1470,7 @@ function BuyTab({ M, filters }) {
         <GranularityToggle value={g1} onChange={setG1} />
         {fastest[g1].length === 0
           ? <Locked msg="No median-days data available for this view." />
-          : <RankTable rows={fastest[g1]} nameKey={g1} />}
+          : <RankTable rows={fastest[g1]} nameKey={g1} onSelectLine={onSelectLine} />}
       </QuestionCard>
 
       {/* Best 10 by profit */}
@@ -1451,7 +1478,7 @@ function BuyTab({ M, filters }) {
         <GranularityToggle value={g2} onChange={setG2} />
         {bestProfit[g2].length === 0
           ? <Locked msg="No profit data available for this view." />
-          : <RankTable rows={bestProfit[g2]} nameKey={g2} />}
+          : <RankTable rows={bestProfit[g2]} nameKey={g2} onSelectLine={onSelectLine} />}
       </QuestionCard>
 
       {/* Best 10 by score */}
@@ -1462,7 +1489,7 @@ function BuyTab({ M, filters }) {
         </div>
         {bestScore[g3].length === 0
           ? <Locked msg="No scored data available for this view." />
-          : <RankTable rows={bestScore[g3]} nameKey={g3} showScore />}
+          : <RankTable rows={bestScore[g3]} nameKey={g3} showScore onSelectLine={onSelectLine} />}
       </QuestionCard>
 
       {/* Stock health by velocity */}
@@ -1476,7 +1503,7 @@ function BuyTab({ M, filters }) {
         </div>
         {healthVel[g4].length === 0
           ? <Locked msg="Not enough sales velocity data to assess stock health for this view." />
-          : <RankTable rows={healthVel[g4].slice(0, 30)} nameKey={g4} />}
+          : <RankTable rows={healthVel[g4].slice(0, 30)} nameKey={g4} onSelectLine={onSelectLine} />}
       </QuestionCard>
 
       {/* Stock health by score */}
@@ -1487,7 +1514,7 @@ function BuyTab({ M, filters }) {
         </div>
         {healthScore[g5].length === 0
           ? <Locked msg="Not enough data to assess stock health for this view." />
-          : <RankTable rows={healthScore[g5].slice(0, 30)} nameKey={g5} showScore />}
+          : <RankTable rows={healthScore[g5].slice(0, 30)} nameKey={g5} showScore onSelectLine={onSelectLine} />}
       </QuestionCard>
 
       {/* Q8: most frequently sold */}
@@ -1517,7 +1544,7 @@ function BuyTab({ M, filters }) {
   );
 }
 
-function ItemTable({ rows, cols }) {
+function ItemTable({ rows, cols, onRowClick }) {
   return (
     <div className="overflow-auto">
       <table className="w-full" style={{ fontFamily: SANS, fontSize: 13 }}>
@@ -1528,7 +1555,12 @@ function ItemTable({ rows, cols }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={i} style={{ borderTop: `1px solid ${C.line}`, color: C.text }}>
+            <tr key={i} onClick={onRowClick ? () => onRowClick(r) : undefined}
+              style={{
+                borderTop: `1px solid ${C.line}`, color: C.text,
+                cursor: onRowClick ? "pointer" : "default",
+              }}
+              className={onRowClick ? "hover:opacity-70" : undefined}>
               {cols.map(([k, , fmt]) => (
                 <td key={k} className="py-2 pr-4">{fmt ? fmt(r[k], r) : (r[k] ?? "--")}</td>
               ))}
