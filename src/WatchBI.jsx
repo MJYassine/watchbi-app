@@ -1143,6 +1143,13 @@ function SalesTab({ M, filters }) {
   const fModel = applyFilters(M.salesByModel, filters);
   const allModels = applyFilters(M.salesByModel, filters);
   const [expandedLine, setExpandedLine] = useState(null);
+  const lineTableRef = useRef(null);
+  const handleLineBarClick = (data) => {
+    const line = data?.payload?.line ?? data?.line;
+    if (!line) return;
+    setExpandedLine(line);
+    lineTableRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
   const fVelocity = applyFilters(M.byVelocity, filters);
   return (
     <div className="flex flex-col gap-5">
@@ -1232,7 +1239,7 @@ function SalesTab({ M, filters }) {
                       <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
                       <YAxis type="category" dataKey="line" width={yAxisW(fLine, "line", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
                       <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
-                      <Bar dataKey="profit" name="Profit" fill={C.gold} radius={[0, 4, 4, 0]} />
+                      <Bar dataKey="profit" name="Profit" fill={C.gold} radius={[0, 4, 4, 0]} cursor="pointer" onClick={handleLineBarClick} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -1245,14 +1252,14 @@ function SalesTab({ M, filters }) {
                       <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} unit=" d" />
                       <YAxis type="category" dataKey="line" width={yAxisW(fLine, "line", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
                       <Tooltip {...chartTip} formatter={(v) => v + " days"} />
-                      <Bar dataKey="medianDays" name="Median days to sell" fill={C.blue} radius={[0, 4, 4, 0]} />
+                      <Bar dataKey="medianDays" name="Median days to sell" fill={C.blue} radius={[0, 4, 4, 0]} cursor="pointer" onClick={handleLineBarClick} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
               </div>
-              <div className="mt-3">
+              <div className="mt-3" ref={lineTableRef}>
                 <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">
-                  Click a row to see its model breakdown
+                  Click a bar above, or a row below, to see its model breakdown
                 </div>
                 <ItemTable rows={fLine}
                   getRowKey={(r) => r.line}
