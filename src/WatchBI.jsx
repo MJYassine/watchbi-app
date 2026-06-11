@@ -915,18 +915,11 @@ function Dashboard({ M, dateRange, setDateRange }) {
   const allHealth = useMemo(() => ["red", "yellow", "green"], []);
 
   const [selectedBrands, toggleBrand, selectAllBrands, brandFilterSet] = useChipFilter(allBrands);
-  const [selectedLines, toggleLine, selectAllLines, lineFilterSet, isolateLine] = useChipFilter(allLines);
+  const [selectedLines, toggleLine, selectAllLines, lineFilterSet] = useChipFilter(allLines);
   const [selectedHealth, toggleHealth, selectAllHealth, healthFilterSet] = useChipFilter(allHealth);
   const [stockFilter, setStockFilter] = useState("all");
   const [filtersOpen, setFiltersOpen] = useState(true);
 
-  // drill down: clicking a product line isolates it in the Line filter and
-  // opens the filter bar so the model-level breakdown below updates to match.
-  const onSelectLine = (line) => {
-    if (!line) return;
-    isolateLine(line);
-    setFiltersOpen(true);
-  };
 
   const filters = {
     brands: brandFilterSet,
@@ -983,8 +976,8 @@ function Dashboard({ M, dateRange, setDateRange }) {
           </div>
         )}
         {tab === "inventory" && <InventoryTab M={M} filters={filters} />}
-        {tab === "sales" && <SalesTab M={M} filters={filters} onSelectLine={onSelectLine} />}
-        {tab === "buy" && <BuyTab M={M} filters={filters} onSelectLine={onSelectLine} />}
+        {tab === "sales" && <SalesTab M={M} filters={filters} />}
+        {tab === "buy" && <BuyTab M={M} filters={filters} />}
       </div>
       <ChatPanel M={M} />
     </div>
@@ -1143,11 +1136,13 @@ function InventoryTab({ M, filters }) {
   );
 }
 
-function SalesTab({ M, filters, onSelectLine }) {
+function SalesTab({ M, filters }) {
   const needsBrand = !M.salesHasBrand;
   const fBrand = applyFilters(M.salesByBrand, filters);
   const fLine = applyFilters(M.salesByLine, filters);
   const fModel = applyFilters(M.salesByModel, filters);
+  const allModels = applyFilters(M.salesByModel, filters);
+  const [expandedLine, setExpandedLine] = useState(null);
   const fVelocity = applyFilters(M.byVelocity, filters);
   return (
     <div className="flex flex-col gap-5">
@@ -1257,13 +1252,35 @@ function SalesTab({ M, filters, onSelectLine }) {
               </div>
               <div className="mt-3">
                 <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">
-                  Click a row to see its model breakdown below
+                  Click a row to see its model breakdown
                 </div>
-                <ItemTable rows={fLine} onRowClick={(r) => onSelectLine?.(r.line)} cols={[
-                  ["brand","Brand"],["line","Line"],["units","Units"],
-                  ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],["medianDays","Median days"],
-                  ["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />],
-                ]} />
+                <ItemTable rows={fLine}
+                  getRowKey={(r) => r.line}
+                  expandedKey={expandedLine}
+                  onRowClick={(r) => setExpandedLine((prev) => (prev === r.line ? null : r.line))}
+                  renderExpanded={(r) => {
+                    const models = allModels.filter((mo) => mo.line === r.line);
+                    return models.length === 0
+                      ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No model-level sales data for {r.line}.</div>
+                      : (
+                        <div>
+                          <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                            {r.line} — by model
+                          </div>
+                          <ItemTable rows={models} cols={[
+                            ["model","Model / Ref #"],["units","Units sold"],
+                            ["profit","Total profit $",fmtMoney],["avgProfit","Avg profit $",fmtMoney],
+                            ["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+                            ["health","Stock health",(v,r2) => <HealthBadge health={v} weeksOfStock={r2?.weeksOfStock} />],
+                          ]} />
+                        </div>
+                      );
+                  }}
+                  cols={[
+                    ["brand","Brand"],["line","Line"],["units","Units"],
+                    ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+                    ["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />],
+                  ]} />
               </div>
             </>)
             : <Locked msg="No product-line matches found. Lines are detected from Rolex, Patek Philippe, AP, and Omega model names." />
@@ -1346,7 +1363,8 @@ function QuestionCard({ num, question, children }) {
 }
 
 /* generic ranked table for model/line rows */
-function RankTable({ rows, nameKey, showScore, onSelectLine }) {
+function RankTable({ rows, nameKey, showScore, models }) {
+  const [expanded, setExpanded] = useState(null);
   const cols = [
     ["brand","Brand"],
     [nameKey, nameKey === "model" ? "Model" : "Line"],
@@ -1359,8 +1377,37 @@ function RankTable({ rows, nameKey, showScore, onSelectLine }) {
   ];
   if (showScore) cols.push(["buyScore","Score",(v) => v?.toFixed(3)]);
   cols.push(["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />]);
-  const onRowClick = nameKey === "line" && onSelectLine ? (r) => onSelectLine(r.line) : undefined;
-  return <ItemTable rows={rows} cols={cols} onRowClick={onRowClick} />;
+
+  if (nameKey === "line" && models) {
+    const subCols = [
+      ["model","Model / Ref #"],["units","Units"],
+      ["profit","Profit $",fmtMoney],["avgProfit","Avg $",fmtMoney],["profitPct","Margin %",fmtPct],
+      ["medianDays","Days"],["stock","Stock",(v) => v == null ? "—" : v === 0 ? "⚡ OUT" : String(v)],
+    ];
+    if (showScore) subCols.push(["buyScore","Score",(v) => v?.toFixed(3)]);
+    subCols.push(["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />]);
+    return (
+      <ItemTable rows={rows} cols={cols}
+        getRowKey={(r) => r.line}
+        expandedKey={expanded}
+        onRowClick={(r) => setExpanded((p) => (p === r.line ? null : r.line))}
+        renderExpanded={(r) => {
+          const sub = models.filter((m) => m.line === r.line);
+          return sub.length === 0
+            ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No model-level sales data for {r.line}.</div>
+            : (
+              <div>
+                <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                  {r.line} — by model
+                </div>
+                <ItemTable rows={sub} cols={subCols} />
+              </div>
+            );
+        }}
+      />
+    );
+  }
+  return <ItemTable rows={rows} cols={cols} />;
 }
 
 /* Model | Product Line toggle */
@@ -1382,7 +1429,7 @@ function GranularityToggle({ value, onChange }) {
   );
 }
 
-function BuyTab({ M, filters, onSelectLine }) {
+function BuyTab({ M, filters }) {
   const [g1, setG1] = useState("model"); // fastest
   const [g2, setG2] = useState("model"); // best profit
   const [g3, setG3] = useState("model"); // best score
@@ -1406,6 +1453,7 @@ function BuyTab({ M, filters, onSelectLine }) {
 
   const ranking = applyFilters(M.ranking, filters);
   const byVelocity = applyFilters(M.byVelocity, filters);
+  const allModels = applyFilters(M.salesByModel, filters);
   const top = ranking[0];
   const topVel = byVelocity[0];
 
@@ -1470,7 +1518,7 @@ function BuyTab({ M, filters, onSelectLine }) {
         <GranularityToggle value={g1} onChange={setG1} />
         {fastest[g1].length === 0
           ? <Locked msg="No median-days data available for this view." />
-          : <RankTable rows={fastest[g1]} nameKey={g1} onSelectLine={onSelectLine} />}
+          : <RankTable rows={fastest[g1]} nameKey={g1} models={allModels} />}
       </QuestionCard>
 
       {/* Best 10 by profit */}
@@ -1478,7 +1526,7 @@ function BuyTab({ M, filters, onSelectLine }) {
         <GranularityToggle value={g2} onChange={setG2} />
         {bestProfit[g2].length === 0
           ? <Locked msg="No profit data available for this view." />
-          : <RankTable rows={bestProfit[g2]} nameKey={g2} onSelectLine={onSelectLine} />}
+          : <RankTable rows={bestProfit[g2]} nameKey={g2} models={allModels} />}
       </QuestionCard>
 
       {/* Best 10 by score */}
@@ -1489,7 +1537,7 @@ function BuyTab({ M, filters, onSelectLine }) {
         </div>
         {bestScore[g3].length === 0
           ? <Locked msg="No scored data available for this view." />
-          : <RankTable rows={bestScore[g3]} nameKey={g3} showScore onSelectLine={onSelectLine} />}
+          : <RankTable rows={bestScore[g3]} nameKey={g3} showScore models={allModels} />}
       </QuestionCard>
 
       {/* Stock health by velocity */}
@@ -1503,7 +1551,7 @@ function BuyTab({ M, filters, onSelectLine }) {
         </div>
         {healthVel[g4].length === 0
           ? <Locked msg="Not enough sales velocity data to assess stock health for this view." />
-          : <RankTable rows={healthVel[g4].slice(0, 30)} nameKey={g4} onSelectLine={onSelectLine} />}
+          : <RankTable rows={healthVel[g4].slice(0, 30)} nameKey={g4} models={allModels} />}
       </QuestionCard>
 
       {/* Stock health by score */}
@@ -1514,7 +1562,7 @@ function BuyTab({ M, filters, onSelectLine }) {
         </div>
         {healthScore[g5].length === 0
           ? <Locked msg="Not enough data to assess stock health for this view." />
-          : <RankTable rows={healthScore[g5].slice(0, 30)} nameKey={g5} showScore onSelectLine={onSelectLine} />}
+          : <RankTable rows={healthScore[g5].slice(0, 30)} nameKey={g5} showScore models={allModels} />}
       </QuestionCard>
 
       {/* Q8: most frequently sold */}
@@ -1544,28 +1592,45 @@ function BuyTab({ M, filters, onSelectLine }) {
   );
 }
 
-function ItemTable({ rows, cols, onRowClick }) {
+function ItemTable({ rows, cols, onRowClick, getRowKey, expandedKey, renderExpanded }) {
   return (
     <div className="overflow-auto">
       <table className="w-full" style={{ fontFamily: SANS, fontSize: 13 }}>
         <thead>
           <tr style={{ color: C.faint }}>
+            {onRowClick && <th style={{ width: 22 }}></th>}
             {cols.map(([k, label]) => <th key={k} className="text-left py-2 pr-4 font-normal text-xs uppercase tracking-wide">{label}</th>)}
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} onClick={onRowClick ? () => onRowClick(r) : undefined}
-              style={{
-                borderTop: `1px solid ${C.line}`, color: C.text,
-                cursor: onRowClick ? "pointer" : "default",
-              }}
-              className={onRowClick ? "hover:opacity-70" : undefined}>
-              {cols.map(([k, , fmt]) => (
-                <td key={k} className="py-2 pr-4">{fmt ? fmt(r[k], r) : (r[k] ?? "--")}</td>
-              ))}
-            </tr>
-          ))}
+          {rows.map((r, i) => {
+            const key = getRowKey ? getRowKey(r) : i;
+            const isExpanded = renderExpanded && expandedKey != null && key === expandedKey;
+            return (
+              <React.Fragment key={key}>
+                <tr onClick={onRowClick ? () => onRowClick(r) : undefined}
+                  style={{
+                    borderTop: `1px solid ${C.line}`, color: C.text,
+                    cursor: onRowClick ? "pointer" : "default",
+                  }}
+                  className={onRowClick ? "hover:opacity-70" : undefined}>
+                  {onRowClick && (
+                    <td className="py-2 text-center" style={{ color: C.faint, fontSize: 11 }}>
+                      {renderExpanded ? (isExpanded ? "▾" : "▸") : ""}
+                    </td>
+                  )}
+                  {cols.map(([k, , fmt]) => (
+                    <td key={k} className="py-2 pr-4">{fmt ? fmt(r[k], r) : (r[k] ?? "--")}</td>
+                  ))}
+                </tr>
+                {isExpanded && (
+                  <tr style={{ borderTop: `1px solid ${C.line}` }}>
+                    <td colSpan={cols.length + 1} className="pt-2 pb-3 pl-6">{renderExpanded(r)}</td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
