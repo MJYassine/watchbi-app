@@ -216,7 +216,7 @@ const median = (arr) => {
 /* =========================================================================
    METRICS ENGINE
    ========================================================================= */
-function computeMetrics(datasets) {
+function computeMetrics(datasets, dateRange) {
   const inv = datasets.find((d) => d.role === "inventory");
   const sal = datasets.find((d) => d.role === "sales");
   const today = new Date();
@@ -323,7 +323,7 @@ function computeMetrics(datasets) {
   /* ----- sales ----- */
   if (sal) {
     const m = sal.mapping;
-    const rows = sal.rows.map((r) => {
+    let rows = sal.rows.map((r) => {
       const cost = toNum(r[m.cost]);
       const price = toNum(r[m.salePrice]);
       let profit = toNum(r[m.profit]);
@@ -343,6 +343,18 @@ function computeMetrics(datasets) {
         type: r[m.inventoryType] || "Unspecified",
       };
     });
+    // overall date span of the sales data (used for the date-range picker bounds)
+    const allSaleDates = rows.map((x) => x.saleDate).filter(Boolean);
+    out.salesDateMin = allSaleDates.length ? new Date(Math.min(...allSaleDates.map((d) => d.getTime()))) : null;
+    out.salesDateMax = allSaleDates.length ? new Date(Math.max(...allSaleDates.map((d) => d.getTime()))) : null;
+
+    // apply optional date-range filter (rows with no sale date are kept either way)
+    if (dateRange && (dateRange.start || dateRange.end)) {
+      const startT = dateRange.start ? new Date(dateRange.start + "T00:00:00").getTime() : -Infinity;
+      const endT = dateRange.end ? new Date(dateRange.end + "T23:59:59").getTime() : Infinity;
+      rows = rows.filter((x) => !x.saleDate || (x.saleDate.getTime() >= startT && x.saleDate.getTime() <= endT));
+    }
+
     out.salesUnits = rows.length;
     out.salesProfit = rows.reduce((s, x) => s + x.profit, 0);
     out.salesRevenue = rows.reduce((s, x) => s + x.price, 0);
@@ -587,32 +599,96 @@ function HealthBadge({ health, weeksOfStock }) {
   );
 }
 
-/* brand filter chips — shared across Sales & Buy tabs */
-function BrandFilter({ brands, selected, onToggle, onAll }) {
-  if (!brands || brands.length < 2) return null;
+/* generic chip-based filter row — used for brand / line / health filters */
+function ChipFilter({ label, items, selected, onToggle, onAll, render }) {
+  if (!items || items.length < 2) return null;
   return (
     <div className="flex flex-wrap items-center gap-2 mb-1">
-      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }}>
-        Filter
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50 }}>
+        {label}
       </span>
       <button onClick={onAll}
         style={{
           fontFamily: SANS, borderRadius: 999, fontSize: 12,
-          border: `1px solid ${selected.size === brands.length ? C.gold : C.line}`,
-          background: selected.size === brands.length ? C.gold : "transparent",
-          color: selected.size === brands.length ? C.bg : C.dim,
+          border: `1px solid ${selected.size === items.length ? C.gold : C.line}`,
+          background: selected.size === items.length ? C.gold : "transparent",
+          color: selected.size === items.length ? C.bg : C.dim,
         }} className="px-3 py-1">All</button>
-      {brands.map((b) => (
-        <button key={b} onClick={() => onToggle(b)}
+      {items.map((it) => (
+        <button key={it} onClick={() => onToggle(it)}
           style={{
             fontFamily: SANS, borderRadius: 999, fontSize: 12,
-            border: `1px solid ${selected.has(b) ? C.gold : C.line}`,
-            background: selected.has(b) ? C.gold : "transparent",
-            color: selected.has(b) ? C.bg : C.dim,
-          }} className="px-3 py-1">{b}</button>
+            border: `1px solid ${selected.has(it) ? C.gold : C.line}`,
+            background: selected.has(it) ? C.gold : "transparent",
+            color: selected.has(it) ? C.bg : C.dim,
+          }} className="px-3 py-1">{render ? render(it) : it}</button>
       ))}
     </div>
   );
+}
+
+/* in-stock / out-of-stock segmented toggle */
+function StockFilter({ value, onChange }) {
+  const opts = [["all", "All"], ["in", "In stock"], ["out", "Out of stock"]];
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-1">
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50 }}>
+        Stock
+      </span>
+      {opts.map(([k, lbl]) => (
+        <button key={k} onClick={() => onChange(k)}
+          style={{
+            fontFamily: SANS, borderRadius: 999, fontSize: 12,
+            border: `1px solid ${value === k ? C.gold : C.line}`,
+            background: value === k ? C.gold : "transparent",
+            color: value === k ? C.bg : C.dim,
+          }} className="px-3 py-1">{lbl}</button>
+      ))}
+    </div>
+  );
+}
+
+/* sale-date range filter (only relevant when sales data is loaded) */
+function DateRangeFilter({ value, onChange, min, max }) {
+  const fmt = (d) => d ? new Date(d).toISOString().slice(0, 10) : undefined;
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-1">
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50 }}>
+        Sale date
+      </span>
+      <input type="date" value={value.start} min={fmt(min)} max={fmt(max)}
+        onChange={(e) => onChange({ ...value, start: e.target.value })}
+        style={{ fontFamily: SANS, fontSize: 12, border: `1px solid ${C.line}`, borderRadius: 8, background: "transparent", color: C.dim }}
+        className="px-2 py-1" />
+      <span style={{ color: C.faint, fontSize: 12 }}>to</span>
+      <input type="date" value={value.end} min={fmt(min)} max={fmt(max)}
+        onChange={(e) => onChange({ ...value, end: e.target.value })}
+        style={{ fontFamily: SANS, fontSize: 12, border: `1px solid ${C.line}`, borderRadius: 8, background: "transparent", color: C.dim }}
+        className="px-2 py-1" />
+      {(value.start || value.end) && (
+        <button onClick={() => onChange({ start: "", end: "" })}
+          style={{ fontFamily: SANS, fontSize: 12, color: C.dim, border: `1px solid ${C.line}`, borderRadius: 999, background: "transparent" }}
+          className="px-3 py-1">Clear</button>
+      )}
+    </div>
+  );
+}
+
+/* generic chip-selection state: clicking a chip while "all" are selected
+   isolates that item; clicking further chips adds/removes from the set. */
+function useChipFilter(allItems) {
+  const [selected, setSelected] = useState(new Set(allItems));
+  useEffect(() => { setSelected(new Set(allItems)); }, [allItems.join("|")]);
+  const toggle = (item) => setSelected((prev) => {
+    const allSelected = prev.size === allItems.length;
+    if (allSelected) return new Set([item]);
+    const next = new Set(prev);
+    next.has(item) ? next.delete(item) : next.add(item);
+    return next.size ? next : new Set(allItems);
+  });
+  const selectAll = () => setSelected(new Set(allItems));
+  const filterSet = selected.size === allItems.length ? null : selected;
+  return [selected, toggle, selectAll, filterSet];
 }
 
 /* =========================================================================
@@ -672,7 +748,8 @@ export default function WatchBI() {
   function removeDs(id) { setDatasets((ds) => ds.filter((d) => d.id !== id)); }
 
   const active = datasets.filter((d) => d.role !== "ignore");
-  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active) : null), [stage, datasets]);
+  const [dateRange, setDateRange] = useState({ start: "", end: "" });
+  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange) : null), [stage, datasets, dateRange]);
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
@@ -697,7 +774,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} />}
     </div>
   );
 }
@@ -812,7 +889,7 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 }
 
 /* ---------- dashboard ---------- */
-function Dashboard({ M }) {
+function Dashboard({ M, dateRange, setDateRange }) {
   const [tab, setTab] = useState(M.hasInv ? "inventory" : "sales");
   const tabs = [
     M.hasInv && ["inventory", "Inventory", Boxes],
@@ -820,26 +897,38 @@ function Dashboard({ M }) {
     M.hasSales && ["buy", "Buy Signals", Sparkles],
   ].filter(Boolean);
 
-  // brand filter shared across Sales & Buy tabs
+  // filters shared across Inventory / Sales / Buy tabs
   const allBrands = useMemo(() => {
     const s = new Set();
     (M.salesByBrand || []).forEach((b) => s.add(b.brand));
     (M.invByBrand || []).forEach((b) => s.add(b.brand));
     return Array.from(s).sort();
   }, [M]);
-  const [selectedBrands, setSelectedBrands] = useState(new Set(allBrands));
-  useEffect(() => { setSelectedBrands(new Set(allBrands)); }, [allBrands.join("|")]);
-  const toggleBrand = (b) => setSelectedBrands((prev) => {
-    const allSelected = prev.size === allBrands.length;
-    // clicking a chip while "all" is active isolates that brand
-    if (allSelected) return new Set([b]);
-    const next = new Set(prev);
-    next.has(b) ? next.delete(b) : next.add(b);
-    return next.size ? next : new Set(allBrands); // never allow empty -> show all
-  });
-  const selectAllBrands = () => setSelectedBrands(new Set(allBrands));
-  const brandFilter = selectedBrands.size === allBrands.length ? null : selectedBrands;
+  const allLines = useMemo(() => {
+    const s = new Set();
+    (M.salesByLine || []).forEach((l) => l.line && s.add(l.line));
+    (M.invByLine || []).forEach((l) => l.line && s.add(l.line));
+    (M.salesByModel || []).forEach((l) => l.line && s.add(l.line));
+    return Array.from(s).sort();
+  }, [M]);
+  const allHealth = useMemo(() => ["red", "yellow", "green"], []);
+
+  const [selectedBrands, toggleBrand, selectAllBrands, brandFilterSet] = useChipFilter(allBrands);
+  const [selectedLines, toggleLine, selectAllLines, lineFilterSet] = useChipFilter(allLines);
+  const [selectedHealth, toggleHealth, selectAllHealth, healthFilterSet] = useChipFilter(allHealth);
+  const [stockFilter, setStockFilter] = useState("all");
   const [filtersOpen, setFiltersOpen] = useState(true);
+
+  const filters = {
+    brands: brandFilterSet,
+    lines: lineFilterSet,
+    health: healthFilterSet,
+    stock: stockFilter,
+  };
+  const dateActive = !!(dateRange && (dateRange.start || dateRange.end));
+  const filtersActiveCount =
+    (brandFilterSet ? 1 : 0) + (lineFilterSet ? 1 : 0) + (healthFilterSet ? 1 : 0) +
+    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0);
 
   return (
     <div className="flex flex-col lg:flex-row" style={{ minHeight: 520 }}>
@@ -866,30 +955,47 @@ function Dashboard({ M }) {
               }} className="px-3 py-1.5 flex items-center gap-2">
               <span style={{ display: "inline-block", transform: filtersOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
               Filters
-              {brandFilter ? (
-                <span style={{ color: C.gold }}>({selectedBrands.size}/{allBrands.length} brands)</span>
+              {filtersActiveCount > 0 ? (
+                <span style={{ color: C.gold }}>({filtersActiveCount} active)</span>
               ) : null}
             </button>
             {filtersOpen && (
-              <div className="mt-2">
-                <BrandFilter brands={allBrands} selected={selectedBrands} onToggle={toggleBrand} onAll={selectAllBrands} />
+              <div className="mt-2 flex flex-col gap-1.5">
+                <ChipFilter label="Brand" items={allBrands} selected={selectedBrands} onToggle={toggleBrand} onAll={selectAllBrands} />
+                <ChipFilter label="Line" items={allLines} selected={selectedLines} onToggle={toggleLine} onAll={selectAllLines} />
+                <ChipFilter label="Health" items={allHealth} selected={selectedHealth} onToggle={toggleHealth} onAll={selectAllHealth}
+                  render={(h) => HEALTH_CFG[h]?.label || h} />
+                <StockFilter value={stockFilter} onChange={setStockFilter} />
+                {M.hasSales && (
+                  <DateRangeFilter value={dateRange} onChange={setDateRange} min={M.salesDateMin} max={M.salesDateMax} />
+                )}
               </div>
             )}
           </div>
         )}
-        {tab === "inventory" && <InventoryTab M={M} brandFilter={brandFilter} />}
-        {tab === "sales" && <SalesTab M={M} brandFilter={brandFilter} />}
-        {tab === "buy" && <BuyTab M={M} brandFilter={brandFilter} />}
+        {tab === "inventory" && <InventoryTab M={M} filters={filters} />}
+        {tab === "sales" && <SalesTab M={M} filters={filters} />}
+        {tab === "buy" && <BuyTab M={M} filters={filters} />}
       </div>
       <ChatPanel M={M} />
     </div>
   );
 }
 
-/* keep only rows whose brand is in the filter set (null filter = no filtering) */
-function applyBrandFilter(rows, brandFilter) {
-  if (!brandFilter || !rows) return rows || [];
-  return rows.filter((r) => brandFilter.has(r.brand));
+/* apply the shared brand / line / health / stock filters to a metrics array.
+   each check is skipped if the row doesn't carry that field (e.g. brand-only
+   aggregates have no `.line`/`.health`/`.stock`, so those filters are a no-op). */
+function applyFilters(rows, filters) {
+  if (!rows) return [];
+  if (!filters) return rows;
+  return rows.filter((r) => {
+    if (filters.brands && !filters.brands.has(r.brand)) return false;
+    if (filters.lines && r.line != null && !filters.lines.has(r.line)) return false;
+    if (filters.health && r.health != null && !filters.health.has(r.health)) return false;
+    if (filters.stock === "in" && r.stock === 0) return false;
+    if (filters.stock === "out" && !(r.stock === 0)) return false;
+    return true;
+  });
 }
 
 /* dynamic height: perRow px per bar + 48px for axes, minimum min px */
@@ -911,24 +1017,25 @@ function SectionLabel({ children }) {
   );
 }
 
-function InventoryTab({ M, brandFilter }) {
-  const fByBrand = applyBrandFilter(M.invByBrand, brandFilter);
-  const fByLine = applyBrandFilter(M.invByLine, brandFilter);
-  const fProjByBrand = applyBrandFilter(M.projByBrand, brandFilter);
-  const fProjByModel = applyBrandFilter(M.projByModel, brandFilter);
+function InventoryTab({ M, filters }) {
+  const fByBrand = applyFilters(M.invByBrand, filters);
+  const fByLine = applyFilters(M.invByLine, filters);
+  const fProjByBrand = applyFilters(M.projByBrand, filters);
+  const fProjByModel = applyFilters(M.projByModel, filters);
   const fInvCount = fByBrand.reduce((s, r) => s + (r.count || 0), 0);
   const fInvCost = fByBrand.reduce((s, r) => s + (r.cost || 0), 0);
   const fProjProfit = fProjByModel.reduce((s, r) => s + (r.profit || 0), 0);
+  const anyFilterActive = !!(filters.brands || filters.lines || filters.health || filters.stock !== "all");
 
   return (
     <div className="flex flex-col gap-5">
       {/* ── KPIs ── */}
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
-        <Stat label="Items in stock" value={brandFilter ? fInvCount : M.invCount} />
-        <Stat label="Capital tied up" value={fmtMoney(brandFilter ? fInvCost : M.invCost)} />
-        <Stat label="Brands" value={brandFilter ? fByBrand.length : M.invBrandCount} />
-        <Stat label="Aged 91+ days" value={fmtMoney(M.agedValue)} sub={brandFilter ? "all brands · not filterable" : "cost sitting on the shelf"} />
-        {M.projItems > 0 && <Stat label="Projected profit" value={fmtMoney(brandFilter ? fProjProfit : M.projProfit)} sub={`${fProjByModel.length} priced items`} />}
+        <Stat label="Items in stock" value={fInvCount} />
+        <Stat label="Capital tied up" value={fmtMoney(fInvCost)} />
+        <Stat label="Brands" value={fByBrand.length} />
+        <Stat label="Aged 91+ days" value={fmtMoney(M.agedValue)} sub={anyFilterActive ? "all brands · not filterable" : "cost sitting on the shelf"} />
+        {M.projItems > 0 && <Stat label="Projected profit" value={fmtMoney(fProjProfit)} sub={`${fProjByModel.length} priced items`} />}
       </div>
 
       {/* ── By Brand ── */}
@@ -1020,12 +1127,12 @@ function InventoryTab({ M, brandFilter }) {
   );
 }
 
-function SalesTab({ M, brandFilter }) {
+function SalesTab({ M, filters }) {
   const needsBrand = !M.salesHasBrand;
-  const fBrand = applyBrandFilter(M.salesByBrand, brandFilter);
-  const fLine = applyBrandFilter(M.salesByLine, brandFilter);
-  const fModel = applyBrandFilter(M.salesByModel, brandFilter);
-  const fVelocity = applyBrandFilter(M.byVelocity, brandFilter);
+  const fBrand = applyFilters(M.salesByBrand, filters);
+  const fLine = applyFilters(M.salesByLine, filters);
+  const fModel = applyFilters(M.salesByModel, filters);
+  const fVelocity = applyFilters(M.byVelocity, filters);
   return (
     <div className="flex flex-col gap-5">
       {/* ── KPIs ── */}
@@ -1248,7 +1355,7 @@ function GranularityToggle({ value, onChange }) {
   );
 }
 
-function BuyTab({ M, brandFilter }) {
+function BuyTab({ M, filters }) {
   const [g1, setG1] = useState("model"); // fastest
   const [g2, setG2] = useState("model"); // best profit
   const [g3, setG3] = useState("model"); // best score
@@ -1270,16 +1377,16 @@ function BuyTab({ M, brandFilter }) {
       </div>
     );
 
-  const ranking = applyBrandFilter(M.ranking, brandFilter);
-  const byVelocity = applyBrandFilter(M.byVelocity, brandFilter);
+  const ranking = applyFilters(M.ranking, filters);
+  const byVelocity = applyFilters(M.byVelocity, filters);
   const top = ranking[0];
   const topVel = byVelocity[0];
 
-  const fastest = { model: applyBrandFilter(M.fastestModels, brandFilter), line: applyBrandFilter(M.fastestLines, brandFilter) };
-  const bestProfit = { model: applyBrandFilter(M.bestProfitModels, brandFilter), line: applyBrandFilter(M.bestProfitLines, brandFilter) };
-  const bestScore = { model: applyBrandFilter(M.bestScoreModels, brandFilter), line: applyBrandFilter(M.bestScoreLines, brandFilter) };
-  const healthVel = { model: applyBrandFilter(M.healthByVelocityModels, brandFilter), line: applyBrandFilter(M.healthByVelocityLines, brandFilter) };
-  const healthScore = { model: applyBrandFilter(M.healthByScoreModels, brandFilter), line: applyBrandFilter(M.healthByScoreLines, brandFilter) };
+  const fastest = { model: applyFilters(M.fastestModels, filters), line: applyFilters(M.fastestLines, filters) };
+  const bestProfit = { model: applyFilters(M.bestProfitModels, filters), line: applyFilters(M.bestProfitLines, filters) };
+  const bestScore = { model: applyFilters(M.bestScoreModels, filters), line: applyFilters(M.bestScoreLines, filters) };
+  const healthVel = { model: applyFilters(M.healthByVelocityModels, filters), line: applyFilters(M.healthByVelocityLines, filters) };
+  const healthScore = { model: applyFilters(M.healthByScoreModels, filters), line: applyFilters(M.healthByScoreLines, filters) };
 
   return (
     <div className="flex flex-col gap-5">
@@ -1388,16 +1495,16 @@ function BuyTab({ M, brandFilter }) {
         <div className="grid gap-5" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
           <div>
             <SectionLabel>By model (top 20)</SectionLabel>
-            <ItemTable rows={applyBrandFilter(M.salesByModel, brandFilter).slice(0, 20)} cols={[
+            <ItemTable rows={applyFilters(M.salesByModel, filters).slice(0, 20)} cols={[
               ["model","Model"],["brand","Brand"],["units","Units"],
               ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],
             ]} />
           </div>
           <div>
             <SectionLabel>By product line</SectionLabel>
-            {applyBrandFilter(M.salesByLine, brandFilter).length === 0
+            {applyFilters(M.salesByLine, filters).length === 0
               ? <Locked msg="No product-line matches in your sales data." />
-              : <ItemTable rows={applyBrandFilter(M.salesByLine, brandFilter)} cols={[
+              : <ItemTable rows={applyFilters(M.salesByLine, filters)} cols={[
                 ["brand","Brand"],["line","Line"],["units","Units"],
                 ["profit","Profit $",fmtMoney],["medianDays","Median days"],
               ]} />
