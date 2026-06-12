@@ -721,7 +721,7 @@ function useChipFilter(allItems) {
   const selectAll = () => setSelected(new Set(allItems));
   const isolate = (item) => setSelected(new Set([item]));
   const filterSet = selected.size === allItems.length ? null : selected;
-  return [selected, toggle, selectAll, filterSet, isolate];
+  return [selected, toggle, selectAll, filterSet, isolate, setSelected];
 }
 
 /* =========================================================================
@@ -948,7 +948,49 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
   const allHealth = useMemo(() => ["red", "yellow", "green"], []);
 
   const [selectedBrands, toggleBrand, selectAllBrands, brandFilterSet] = useChipFilter(allBrands);
-  const [selectedLines, toggleLine, selectAllLines, lineFilterSet] = useChipFilter(allLines);
+  const [selectedLines, toggleLine, selectAllLines, lineFilterSet, , setSelectedLines] = useChipFilter(allLines);
+
+  // map of brand -> set of product lines that belong to it, so selecting a
+  // brand can auto-select its lines in the Line filter
+  const brandLineMap = useMemo(() => {
+    const map = {};
+    const addAll = (arr) => (arr || []).forEach((x) => {
+      if (!x.line || !x.brand) return;
+      if (!map[x.brand]) map[x.brand] = new Set();
+      map[x.brand].add(x.line);
+    });
+    addAll(M.salesByLine); addAll(M.invByLine); addAll(M.salesByModel);
+    return map;
+  }, [M]);
+
+  function syncLinesToBrands(newBrands) {
+    if (newBrands.size === allBrands.length) {
+      setSelectedLines(new Set(allLines));
+      return;
+    }
+    const lines = new Set();
+    newBrands.forEach((b) => (brandLineMap[b] || new Set()).forEach((l) => lines.add(l)));
+    setSelectedLines(lines.size ? lines : new Set(allLines));
+  }
+
+  function handleToggleBrand(item) {
+    toggleBrand(item);
+    const wasAllSelected = selectedBrands.size === allBrands.length;
+    let newBrands;
+    if (wasAllSelected) {
+      newBrands = new Set([item]);
+    } else {
+      newBrands = new Set(selectedBrands);
+      newBrands.has(item) ? newBrands.delete(item) : newBrands.add(item);
+      if (!newBrands.size) newBrands = new Set(allBrands);
+    }
+    syncLinesToBrands(newBrands);
+  }
+
+  function handleSelectAllBrands() {
+    selectAllBrands();
+    setSelectedLines(new Set(allLines));
+  }
   const [selectedHealth, toggleHealth, selectAllHealth, healthFilterSet] = useChipFilter(allHealth);
   const [stockFilter, setStockFilter] = useState("all");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -996,7 +1038,7 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
             </button>
             {filtersOpen && (
               <div className="mt-2 flex flex-col gap-1.5">
-                <ChipFilter label="Brand" items={allBrands} selected={selectedBrands} onToggle={toggleBrand} onAll={selectAllBrands} />
+                <ChipFilter label="Brand" items={allBrands} selected={selectedBrands} onToggle={handleToggleBrand} onAll={handleSelectAllBrands} />
                 <ChipFilter label="Line" items={allLines} selected={selectedLines} onToggle={toggleLine} onAll={selectAllLines} />
                 <ChipFilter label="Health" items={allHealth} selected={selectedHealth} onToggle={toggleHealth} onAll={selectAllHealth}
                   render={(h) => HEALTH_CFG[h]?.label || h} />
