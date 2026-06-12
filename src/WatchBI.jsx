@@ -1055,7 +1055,7 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
         )}
         {tab === "inventory" && <InventoryTab M={M} filters={filters} />}
         {tab === "sales" && <SalesTab M={M} filters={filters} />}
-        {tab === "buy" && <BuyTab M={M} filters={filters} />}
+        {tab === "buy" && <BuyTab M={M} filters={filters} includePresold={includePresold} />}
       </div>
       <ChatPanel M={M} />
     </div>
@@ -1514,7 +1514,7 @@ function GranularityToggle({ value, onChange }) {
   );
 }
 
-function BuyTab({ M, filters }) {
+function BuyTab({ M, filters, includePresold }) {
   const [g1, setG1] = useState("model"); // fastest
   const [g2, setG2] = useState("model"); // best profit
   const [g3, setG3] = useState("model"); // best score
@@ -1620,6 +1620,9 @@ function BuyTab({ M, filters }) {
         <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
           Scored by: velocity (35%) + avg profit (35%) + sales volume (30%). Out-of-stock items get a boost.
           Stock health = current stock ÷ weekly sell rate (red &lt; 1 week, yellow &lt; 2 weeks).
+          {" "}{includePresold
+            ? "Presold sales (0–5 days) are included in this ranking."
+            : "Presold sales (0–5 days) are excluded from this ranking — toggle \"Include presold\" in the filter bar to factor them in."}
         </div>
         <RankTable rows={ranking.slice(0, 20)} nameKey="model" showScore />
       </QuestionCard>
