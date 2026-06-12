@@ -216,7 +216,7 @@ const median = (arr) => {
 /* =========================================================================
    METRICS ENGINE
    ========================================================================= */
-function computeMetrics(datasets, dateRange) {
+function computeMetrics(datasets, dateRange, includePresold) {
   const inv = datasets.find((d) => d.role === "inventory");
   const sal = datasets.find((d) => d.role === "sales");
   const today = new Date();
@@ -332,9 +332,10 @@ function computeMetrics(datasets, dateRange) {
       const sdt = toDate(r[m.saleDate]);
       let days = daysBetween(pd, sdt);
       if (days != null && (days < 0 || days > 2000)) days = null; // typo guard
+      const presold = days != null && days >= 0 && days <= 5;
       const brandNorm = normalizeBrand(r[m.brand]);
       return {
-        saleDate: sdt, days, cost: cost || 0, price: price || 0,
+        saleDate: sdt, days, presold, cost: cost || 0, price: price || 0,
         profit: profit || 0,
         marginPct: cost ? (profit / cost) * 100 : null,
         brand: r[m.brand] || null, brandNorm,
@@ -353,6 +354,13 @@ function computeMetrics(datasets, dateRange) {
       const startT = dateRange.start ? new Date(dateRange.start + "T00:00:00").getTime() : -Infinity;
       const endT = dateRange.end ? new Date(dateRange.end + "T23:59:59").getTime() : Infinity;
       rows = rows.filter((x) => !x.saleDate || (x.saleDate.getTime() >= startT && x.saleDate.getTime() <= endT));
+    }
+
+    // "presold" = sold within 0-5 days of purchase — likely flipped before it ever
+    // hit the floor, so it's excluded from sell-through analysis by default.
+    out.presoldCount = rows.filter((x) => x.presold).length;
+    if (!includePresold) {
+      rows = rows.filter((x) => !x.presold);
     }
 
     out.salesUnits = rows.length;
@@ -648,6 +656,30 @@ function StockFilter({ value, onChange }) {
   );
 }
 
+/* presold (0-5 day) sales toggle */
+function PresoldFilter({ value, onChange, count }) {
+  const opts = [[false, "Exclude presold (default)"], [true, "Include presold"]];
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-1">
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50 }}>
+        Presold
+      </span>
+      {opts.map(([k, lbl]) => (
+        <button key={String(k)} onClick={() => onChange(k)}
+          style={{
+            fontFamily: SANS, borderRadius: 999, fontSize: 12,
+            border: `1px solid ${value === k ? C.gold : C.line}`,
+            background: value === k ? C.gold : "transparent",
+            color: value === k ? C.bg : C.dim,
+          }} className="px-3 py-1">{lbl}</button>
+      ))}
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
+        Sales completed within 0–5 days of purchase ({count ?? 0}) are considered "presold" and {value ? "are included in" : "are not part of"} this analysis.
+      </span>
+    </div>
+  );
+}
+
 /* sale-date range filter (only relevant when sales data is loaded) */
 function DateRangeFilter({ value, onChange, min, max }) {
   const fmt = (d) => d ? new Date(d).toISOString().slice(0, 10) : undefined;
@@ -750,7 +782,8 @@ export default function WatchBI() {
 
   const active = datasets.filter((d) => d.role !== "ignore");
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
-  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange) : null), [stage, datasets, dateRange]);
+  const [includePresold, setIncludePresold] = useState(false);
+  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold) : null), [stage, datasets, dateRange, includePresold]);
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
@@ -775,7 +808,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} />}
     </div>
   );
 }
@@ -890,7 +923,7 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 }
 
 /* ---------- dashboard ---------- */
-function Dashboard({ M, dateRange, setDateRange }) {
+function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePresold }) {
   const [tab, setTab] = useState(M.hasInv ? "inventory" : "sales");
   const tabs = [
     M.hasInv && ["inventory", "Inventory", Boxes],
@@ -918,7 +951,7 @@ function Dashboard({ M, dateRange, setDateRange }) {
   const [selectedLines, toggleLine, selectAllLines, lineFilterSet] = useChipFilter(allLines);
   const [selectedHealth, toggleHealth, selectAllHealth, healthFilterSet] = useChipFilter(allHealth);
   const [stockFilter, setStockFilter] = useState("all");
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
 
   const filters = {
@@ -930,7 +963,7 @@ function Dashboard({ M, dateRange, setDateRange }) {
   const dateActive = !!(dateRange && (dateRange.start || dateRange.end));
   const filtersActiveCount =
     (brandFilterSet ? 1 : 0) + (lineFilterSet ? 1 : 0) + (healthFilterSet ? 1 : 0) +
-    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0);
+    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0);
 
   return (
     <div className="flex flex-col lg:flex-row" style={{ minHeight: 520 }}>
@@ -968,6 +1001,9 @@ function Dashboard({ M, dateRange, setDateRange }) {
                 <ChipFilter label="Health" items={allHealth} selected={selectedHealth} onToggle={toggleHealth} onAll={selectAllHealth}
                   render={(h) => HEALTH_CFG[h]?.label || h} />
                 <StockFilter value={stockFilter} onChange={setStockFilter} />
+                {M.hasSales && (
+                  <PresoldFilter value={includePresold} onChange={setIncludePresold} count={M.presoldCount} />
+                )}
                 {M.hasSales && (
                   <DateRangeFilter value={dateRange} onChange={setDateRange} min={M.salesDateMin} max={M.salesDateMax} />
                 )}
@@ -1459,10 +1495,20 @@ function BuyTab({ M, filters }) {
     );
 
   const ranking = applyFilters(M.ranking, filters);
-  const byVelocity = applyFilters(M.byVelocity, filters);
   const allModels = applyFilters(M.salesByModel, filters);
-  const top = ranking[0];
-  const topVel = byVelocity[0];
+  const velProf = applyFilters(M.velProfRanking, filters);
+
+  const [excludedKeys, setExcludedKeys] = useState(() => new Set());
+  const keyOf = (x) => (x.brand || "") + "|" + x.model;
+  const availableVelProf = velProf.filter((x) => !excludedKeys.has(keyOf(x)));
+  const top10VelProf = availableVelProf.slice(0, 10);
+  const excludedVelProf = velProf.filter((x) => excludedKeys.has(keyOf(x)));
+  function excludeVelProf(x) {
+    setExcludedKeys((prev) => new Set(prev).add(keyOf(x)));
+  }
+  function restoreVelProf(x) {
+    setExcludedKeys((prev) => { const next = new Set(prev); next.delete(keyOf(x)); return next; });
+  }
 
   const fastest = { model: applyFilters(M.fastestModels, filters), line: applyFilters(M.fastestLines, filters) };
   const bestProfit = { model: applyFilters(M.bestProfitModels, filters), line: applyFilters(M.bestProfitLines, filters) };
@@ -1475,35 +1521,51 @@ function BuyTab({ M, filters }) {
 
       {/* Q1 */}
       <QuestionCard num="1" question="What is our highest velocity, highest profit product — and are we out?">
-        {top ? (
+        {top10VelProf.length ? (
           <div className="flex flex-col gap-3">
-            <div style={{ background: C.panel2, borderRadius: 12 }} className="p-4">
-              <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }} className="mb-1">
-                Top buy signal (velocity + profit + volume)
-              </div>
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div>
-                  <div style={{ fontFamily: SERIF, color: C.gold }} className="text-xl">{top.brand} — {top.model}</div>
-                  <div style={{ color: C.dim, fontFamily: SANS }} className="text-sm mt-1">
-                    {top.units} sold · {fmtMoney(top.avgProfit)} avg profit · {top.medianDays != null ? top.medianDays + " days to sell" : "—"} · {fmtPct(top.profitPct)} margin
-                  </div>
-                </div>
-                <HealthBadge health={top.health || (top.stock === 0 || top.stock == null ? "red" : "green")} weeksOfStock={top.weeksOfStock} />
-              </div>
+            <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12 }}>
+              Top 10 ranked by velocity + profit combined. Click "Exclude" to drop a watch from the list — the next-ranked watch will take its place.
             </div>
-            {topVel && topVel.model !== top.model && (
-              <div style={{ background: C.panel2, borderRadius: 12 }} className="p-4">
-                <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }} className="mb-1">
-                  Fastest seller (median days)
-                </div>
-                <div className="flex items-center justify-between flex-wrap gap-3">
-                  <div>
-                    <div style={{ fontFamily: SERIF, color: C.blue }} className="text-xl">{topVel.brand} — {topVel.model}</div>
-                    <div style={{ color: C.dim, fontFamily: SANS }} className="text-sm mt-1">
-                      {topVel.medianDays} days median · {topVel.units} sold · {fmtMoney(topVel.avgProfit)} avg profit
+            <div className="flex flex-col gap-2">
+              {top10VelProf.map((x, i) => (
+                <div key={keyOf(x)} style={{ background: C.panel2, borderRadius: 12 }} className="p-4">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center gap-3">
+                      <div style={{ color: C.gold, fontFamily: SERIF, fontSize: 18, minWidth: 24 }}>#{i + 1}</div>
+                      <div>
+                        <div style={{ fontFamily: SERIF, color: C.gold }} className="text-lg">{x.brand} — {x.model}</div>
+                        <div style={{ color: C.dim, fontFamily: SANS }} className="text-sm mt-1">
+                          {x.units} sold · {fmtMoney(x.avgProfit)} avg profit · {x.medianDays != null ? x.medianDays + " days to sell" : "—"} · {fmtPct(x.profitPct)} margin
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <HealthBadge health={x.health || (x.stock === 0 || x.stock == null ? "red" : "green")} weeksOfStock={x.weeksOfStock} />
+                      <button onClick={() => excludeVelProf(x)}
+                        style={{
+                          fontFamily: SANS, fontSize: 12, borderRadius: 8,
+                          border: `1px solid ${C.line}`, background: "transparent", color: C.dim,
+                        }} className="px-3 py-1">
+                        Exclude
+                      </button>
                     </div>
                   </div>
-                  <HealthBadge health={topVel.health || (topVel.stock === 0 || topVel.stock == null ? "red" : "green")} weeksOfStock={topVel.weeksOfStock} />
+                </div>
+              ))}
+            </div>
+            {excludedVelProf.length > 0 && (
+              <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }} className="mt-1">
+                <div className="mb-1">Excluded:</div>
+                <div className="flex flex-wrap gap-2">
+                  {excludedVelProf.map((x) => (
+                    <button key={keyOf(x)} onClick={() => restoreVelProf(x)}
+                      style={{
+                        fontFamily: SANS, fontSize: 12, borderRadius: 999,
+                        border: `1px solid ${C.line}`, background: "transparent", color: C.dim,
+                      }} className="px-3 py-1">
+                      {x.brand} — {x.model} ✕
+                    </button>
+                  ))}
                 </div>
               </div>
             )}
