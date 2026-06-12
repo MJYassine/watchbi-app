@@ -65,7 +65,8 @@ const FIELDS = {
     ["cost", "Cost (COGS)"], ["salePrice", "Sale / invoice price"],
     ["profit", "Profit $ (optional)"], ["brand", "Brand (optional)"],
     ["modelName", "Model name (optional)"], ["modelNumber", "Model / reference # (optional)"],
-    ["inventoryType", "Inventory type (optional)"], ["serial", "Serial # (optional)"],
+    ["inventoryType", "Inventory type (optional)"], ["condition", "Condition — New/Used (optional)"],
+    ["serial", "Serial # (optional)"],
   ],
 };
 
@@ -80,6 +81,7 @@ function guessField(role, header) {
     if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
     if (has("invoice price") || has("sale price") || has("sold price")) return "salePrice";
     if (h === "profit") return "profit";
+    if (has("condition")) return "condition";
     if (has("inventory type") || h === "type") return "inventoryType";
   }
   if (has("purchase date") || has("purchased date")) return "purchaseDate";
@@ -131,6 +133,53 @@ function daysBetween(a, b) {
   if (!a || !b) return null;
   return Math.round((b - a) / 86400000);
 }
+
+/* normalize a free-text condition value to "New" / "Used" (falls back to the
+   raw value, title-cased, if it's neither — e.g. "CPO" / "Pre-Owned") */
+function normalizeCondition(v) {
+  if (v == null || v === "") return "Unspecified";
+  const s = String(v).trim().toLowerCase();
+  if (!s) return "Unspecified";
+  if (s.includes("new")) return "New";
+  if (s.includes("used") || s.includes("pre-owned") || s.includes("preowned") || s.includes("pre owned") || s.includes("second")) return "Used";
+  return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+/* price tier buckets for sale price breakdowns */
+const PRICE_TIERS = [
+  { label: "$0-5k", lo: 0, hi: 5000 },
+  { label: "$5-10k", lo: 5000, hi: 10000 },
+  { label: "$10-20k", lo: 10000, hi: 20000 },
+  { label: "$20-30k", lo: 20000, hi: 30000 },
+  { label: "$30-40k", lo: 30000, hi: 40000 },
+  { label: "$40-50k", lo: 40000, hi: 50000 },
+  { label: "$50-100k", lo: 50000, hi: 100000 },
+  { label: "$100k+", lo: 100000, hi: Infinity },
+];
+function priceTierLabel(price) {
+  if (price == null) return null;
+  for (const t of PRICE_TIERS) {
+    if (price >= t.lo && price < t.hi) return t.label;
+  }
+  return PRICE_TIERS[PRICE_TIERS.length - 1].label;
+}
+
+/* inventory condition grade A (fresh) -> F (aged) based on days in stock */
+const GRADE_BUCKETS = [
+  { grade: "A", lo: 0, hi: 30 },
+  { grade: "B", lo: 31, hi: 60 },
+  { grade: "C", lo: 61, hi: 90 },
+  { grade: "D", lo: 91, hi: 180 },
+  { grade: "F", lo: 181, hi: Infinity },
+];
+function ageGrade(age) {
+  if (age == null) return null;
+  for (const b of GRADE_BUCKETS) {
+    if (age >= b.lo && age <= b.hi) return b.grade;
+  }
+  return "F";
+}
+const GRADE_RANK = { A: 0, B: 1, C: 2, D: 3, F: 4 };
 
 function normalizeBrand(b) {
   if (!b) return null;
@@ -231,15 +280,18 @@ function computeMetrics(datasets, dateRange, includePresold) {
       const tag = toNum(r[m.tagPrice]);
       const brandNorm = normalizeBrand(r[m.brand]);
       const pd = toDate(r[m.purchaseDate]);
+      const age = pd ? daysBetween(pd, today) : null;
       return {
         brand: r[m.brand] || "Unknown",
         brandNorm,
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName],
+        modelNumber: r[m.modelNumber] || null,
         cost: cost || 0,
         targetWholesale: tw,
         tagPrice: tag,
-        age: pd ? daysBetween(pd, today) : null,
+        age,
+        grade: ageGrade(age),
         status: r[m.status],
       };
     });
@@ -276,6 +328,21 @@ function computeMetrics(datasets, dateRange, includePresold) {
     });
     out.aging = buckets;
     out.agedValue = buckets.filter((b) => b.lo >= 91).reduce((s, b) => s + b.cost, 0);
+
+    // ── condition grading (A = fresh, F = aged) ──
+    const byGrade = {};
+    items.forEach((x) => {
+      if (!x.grade) return;
+      byGrade[x.grade] = byGrade[x.grade] || { grade: x.grade, count: 0, cost: 0 };
+      byGrade[x.grade].count++; byGrade[x.grade].cost += x.cost;
+    });
+    out.invByGrade = GRADE_BUCKETS.map((b) => byGrade[b.grade] || { grade: b.grade, count: 0, cost: 0 });
+
+    // ── top 10 watches to sell: worst grade first, then most cash tied up ──
+    out.needToSell = [...items]
+      .filter((x) => x.grade)
+      .sort((a, b) => (GRADE_RANK[b.grade] - GRADE_RANK[a.grade]) || (b.cost - a.cost))
+      .slice(0, 10);
 
     const withTarget = items.filter((x) => x.targetWholesale && x.targetWholesale > 0);
     out.projItems = withTarget.length;
@@ -342,6 +409,8 @@ function computeMetrics(datasets, dateRange, includePresold) {
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName] || null,
         type: r[m.inventoryType] || "Unspecified",
+        condition: normalizeCondition(r[m.condition]),
+        priceTier: priceTierLabel(price),
       };
     });
     // overall date span of the sales data (used for the date-range picker bounds)
@@ -349,11 +418,20 @@ function computeMetrics(datasets, dateRange, includePresold) {
     out.salesDateMin = allSaleDates.length ? new Date(Math.min(...allSaleDates.map((d) => d.getTime()))) : null;
     out.salesDateMax = allSaleDates.length ? new Date(Math.max(...allSaleDates.map((d) => d.getTime()))) : null;
 
-    // apply optional date-range filter (rows with no sale date are kept either way)
+    // apply optional date-range filter (rows with no sale date are kept either way);
+    // if the user hasn't picked a custom range, default to the trailing 45-day
+    // sales history — this also drives the Buy Signals tab.
+    out.salesWindowDays = 45;
     if (dateRange && (dateRange.start || dateRange.end)) {
       const startT = dateRange.start ? new Date(dateRange.start + "T00:00:00").getTime() : -Infinity;
       const endT = dateRange.end ? new Date(dateRange.end + "T23:59:59").getTime() : Infinity;
       rows = rows.filter((x) => !x.saleDate || (x.saleDate.getTime() >= startT && x.saleDate.getTime() <= endT));
+      out.usingDefaultWindow = false;
+    } else if (out.salesDateMax) {
+      const windowStartT = out.salesDateMax.getTime() - out.salesWindowDays * 86400000;
+      out.windowStart = new Date(windowStartT);
+      rows = rows.filter((x) => x.saleDate && x.saleDate.getTime() >= windowStartT);
+      out.usingDefaultWindow = true;
     }
 
     // "presold" = sold within 0-5 days of purchase — likely flipped before it ever
@@ -399,6 +477,22 @@ function computeMetrics(datasets, dateRange, includePresold) {
     });
     out.salesByType = Object.values(bt).sort((a, b) => b.units - a.units);
 
+    // by price tier
+    const bp = {};
+    rows.forEach((x) => {
+      const tier = x.priceTier || "Unspecified";
+      bp[tier] = bp[tier] || { tier, units: 0, profit: 0, revenue: 0, cost: 0, _m: [] };
+      bp[tier].units++; bp[tier].profit += x.profit; bp[tier].revenue += x.price; bp[tier].cost += x.cost;
+      if (x.marginPct != null) bp[tier]._m.push(x.marginPct);
+    });
+    out.salesByPriceTier = PRICE_TIERS.map((t) => bp[t.label] || { tier: t.label, units: 0, profit: 0, revenue: 0, cost: 0, _m: [] })
+      .map((b) => ({
+        tier: b.tier, units: b.units, profit: b.profit, revenue: b.revenue,
+        avgProfit: b.units ? b.profit / b.units : null,
+        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+        medianMargin: median(b._m),
+      }));
+
     // brand-level (only if brand present on sales)
     out.salesHasBrand = rows.some((x) => x.brand);
     if (out.salesHasBrand) {
@@ -415,6 +509,23 @@ function computeMetrics(datasets, dateRange, includePresold) {
         profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
         medianDays: median(b._days), medianMargin: median(b._m),
       })).sort((a, b) => b.profit - a.profit);
+
+      // by brand & condition (new / used)
+      const bc = {};
+      rows.forEach((x) => {
+        const brand = x.brand || "Unknown";
+        const cond = x.condition || "Unspecified";
+        const k = brand + " · " + cond;
+        bc[k] = bc[k] || { key: k, brand, condition: cond, units: 0, profit: 0, revenue: 0, cost: 0, _m: [] };
+        bc[k].units++; bc[k].profit += x.profit; bc[k].revenue += x.price; bc[k].cost += x.cost;
+        if (x.marginPct != null) bc[k]._m.push(x.marginPct);
+      });
+      out.salesByBrandCondition = Object.values(bc).map((b) => ({
+        key: b.key, brand: b.brand, condition: b.condition, units: b.units, profit: b.profit, revenue: b.revenue,
+        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+        medianMargin: median(b._m),
+      })).sort((a, b) => (a.brand === b.brand ? a.condition.localeCompare(b.condition) : b.profit - a.profit));
+      out.hasCondition = rows.some((x) => x.condition && x.condition !== "Unspecified");
 
       // by product line
       const bl = {};
@@ -455,14 +566,19 @@ function computeMetrics(datasets, dateRange, includePresold) {
       }));
       models = enrichRanking(models, out.salesWeeks);
       out.salesByModel = [...models].sort((a, b) => b.units - a.units);
-      out.ranking = [...models].sort((a, b) => b.buyScore - a.buyScore);
       out.byVelocity = [...models]
         .filter((x) => x.medianDays != null)
         .sort((a, b) => a.medianDays - b.medianDays);
+
+      // buy signals / "most profitable" should ignore models that have only
+      // sold once or twice — not enough history to trust the ranking
+      const modelsForBuy = models.filter((x) => x.units >= 3);
+      out.ranking = [...modelsForBuy].sort((a, b) => b.buyScore - a.buyScore);
+
       // combined velocity × profit ranking (for Q3)
-      const maxP2 = Math.max(...models.map((x) => x.avgProfit || 0)) || 1;
-      const maxD2 = Math.max(...models.map((x) => x.medianDays || 0)) || 1;
-      out.velProfRanking = [...models].sort((a, b) => {
+      const maxP2 = Math.max(...modelsForBuy.map((x) => x.avgProfit || 0)) || 1;
+      const maxD2 = Math.max(...modelsForBuy.map((x) => x.medianDays || 0)) || 1;
+      out.velProfRanking = [...modelsForBuy].sort((a, b) => {
         const scoreA = (1 - (a.medianDays ?? maxD2) / maxD2) * 0.5 + (maxP2 ? (a.avgProfit || 0) / maxP2 : 0) * 0.5;
         const scoreB = (1 - (b.medianDays ?? maxD2) / maxD2) * 0.5 + (maxP2 ? (b.avgProfit || 0) / maxP2 : 0) * 0.5;
         return scoreB - scoreA;
@@ -472,18 +588,18 @@ function computeMetrics(datasets, dateRange, includePresold) {
       const top = (arr, n, sortFn) => [...arr].sort(sortFn).slice(0, n);
       out.fastestModels = top(models.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
       out.fastestLines = top(out.salesByLine.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
-      out.bestProfitModels = top(models, 10, (a, b) => b.profit - a.profit);
+      out.bestProfitModels = top(modelsForBuy, 10, (a, b) => b.profit - a.profit);
       out.bestProfitLines = top(out.salesByLine, 10, (a, b) => b.profit - a.profit);
-      out.bestScoreModels = top(models, 10, (a, b) => b.buyScore - a.buyScore);
+      out.bestScoreModels = top(modelsForBuy, 10, (a, b) => b.buyScore - a.buyScore);
       out.bestScoreLines = top(out.salesByLine, 10, (a, b) => b.buyScore - a.buyScore);
 
       // ── Stock health lists ──
       const healthRank = { red: 0, yellow: 1, green: 2 };
-      out.healthByVelocityModels = models.filter((x) => x.health)
+      out.healthByVelocityModels = modelsForBuy.filter((x) => x.health)
         .sort((a, b) => (a.weeksOfStock ?? 1e9) - (b.weeksOfStock ?? 1e9));
       out.healthByVelocityLines = out.salesByLine.filter((x) => x.health)
         .sort((a, b) => (a.weeksOfStock ?? 1e9) - (b.weeksOfStock ?? 1e9));
-      out.healthByScoreModels = models.filter((x) => x.health)
+      out.healthByScoreModels = modelsForBuy.filter((x) => x.health)
         .sort((a, b) => (healthRank[a.health] - healthRank[b.health]) || (b.buyScore - a.buyScore));
       out.healthByScoreLines = out.salesByLine.filter((x) => x.health)
         .sort((a, b) => (healthRank[a.health] - healthRank[b.health]) || (b.buyScore - a.buyScore));
@@ -509,6 +625,12 @@ function metricsForChat(M) {
       projected_profit_items: M.projItems,
       projected_profit_total: Math.round(M.projProfit),
       projected_profit_note: "only computed on items that have a target wholesale price",
+      by_grade: M.invByGrade.map((b) => ({ grade: b.grade, items: b.count, cost: Math.round(b.cost) })),
+      grade_note: "A = 0-30 days in stock, B = 31-60, C = 61-90, D = 91-180, F = 180+",
+      top_to_sell: (M.needToSell || []).map((b) => ({
+        brand: b.brand, model: b.modelName, ref: b.modelNumber,
+        grade: b.grade, days_in_stock: b.age, cost: Math.round(b.cost),
+      })),
     };
   }
   if (M.hasSales) {
@@ -517,7 +639,16 @@ function metricsForChat(M) {
       revenue: Math.round(M.salesRevenue),
       median_margin_pct: M.medianMargin && +M.medianMargin.toFixed(1),
       median_days_to_sell: M.medianDays, mean_days_to_sell: M.meanDays && Math.round(M.meanDays),
+      window_note: M.usingDefaultWindow
+        ? `figures reflect the trailing ${M.salesWindowDays} days of sales history (through ${M.salesDateMax ? M.salesDateMax.toISOString().slice(0, 10) : "--"})`
+        : "figures reflect the user-selected date range",
       by_inventory_type: M.salesByType,
+      by_price_tier: M.salesByPriceTier.map((b) => ({
+        tier: b.tier, units: b.units, profit: Math.round(b.profit), avg_profit: b.avgProfit != null ? Math.round(b.avgProfit) : null,
+      })),
+      by_brand_condition: (M.salesByBrandCondition || []).map((b) => ({
+        brand: b.brand, condition: b.condition, units: b.units, profit: Math.round(b.profit), margin_pct: b.profitPct != null ? +b.profitPct.toFixed(1) : null,
+      })),
       monthly: M.monthly,
     };
     if (M.salesHasBrand) {
@@ -603,6 +734,26 @@ function HealthBadge({ health, weeksOfStock }) {
       fontWeight: 700, fontSize: 11, padding: "3px 8px", letterSpacing: ".03em", whiteSpace: "nowrap",
     }}>
       {cfg.label}{weeksOfStock != null ? ` · ${weeksOfStock}w` : ""}
+    </span>
+  );
+}
+
+const GRADE_CFG = {
+  A: { bg: C.green, label: "A" },
+  B: { bg: C.blue, label: "B" },
+  C: { bg: C.gold, label: "C" },
+  D: { bg: "#c8863a", label: "D" },
+  F: { bg: C.red, label: "F" },
+};
+function GradeBadge({ grade }) {
+  if (!grade) return <span style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>—</span>;
+  const cfg = GRADE_CFG[grade] || { bg: C.faint, label: grade };
+  return (
+    <span style={{
+      background: cfg.bg, color: "#1a1410", borderRadius: 6, fontFamily: SANS,
+      fontWeight: 700, fontSize: 12, padding: "3px 9px", letterSpacing: ".03em", whiteSpace: "nowrap",
+    }}>
+      {cfg.label}
     </span>
   );
 }
@@ -1184,6 +1335,47 @@ function InventoryTab({ M, filters }) {
         </div>
       </Panel>
 
+      {/* ── Condition grading ── */}
+      <Panel title="Condition grade (A → F)" note="A = just bought, F = sitting longest">
+        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+          Every item is graded by how long it's been in stock: A (0–30 days), B (31–60), C (61–90), D (91–180), F (180+).
+          Grades naturally fall as a watch sits longer without selling.
+        </div>
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={M.invByGrade} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+              <CartesianGrid stroke={C.line} vertical={false} />
+              <XAxis dataKey="grade" tick={{ fill: C.dim, fontSize: 11 }} />
+              <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
+              <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+              <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]}>
+                {M.invByGrade.map((b, i) => <Cell key={i} fill={(GRADE_CFG[b.grade] || {}).bg || C.gold} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <ItemTable rows={M.invByGrade} cols={[
+            ["grade","Grade",(v) => <GradeBadge grade={v} />],
+            ["count","Items"],["cost","Cost tied up",fmtMoney],
+          ]} />
+        </div>
+      </Panel>
+
+      {/* ── Top 10 to sell ── */}
+      <Panel title="Top 10 watches to sell" note="worst grade + most cash tied up first">
+        {M.needToSell && M.needToSell.length > 0 ? (
+          <>
+            <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+              These are holding the most cash for the longest. Moving these frees up capital to reinvest in faster, more profitable watches.
+            </div>
+            <ItemTable rows={M.needToSell} cols={[
+              ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+              ["grade","Grade",(v) => <GradeBadge grade={v} />],
+              ["age","Days in stock"],["cost","Cost",fmtMoney],
+            ]} />
+          </>
+        ) : <Locked msg="No graded inventory items available." />}
+      </Panel>
+
       {/* ── Projected Profit ── */}
       {M.projItems === 0
         ? <Panel title="Projected profit"><Locked msg="No items have a target wholesale price yet. Add 'Target Wholesale Price' to your inventory export." /></Panel>
@@ -1231,6 +1423,12 @@ function SalesTab({ M, filters }) {
   const fVelocity = applyFilters(M.byVelocity, filters);
   return (
     <div className="flex flex-col gap-5">
+      {M.usingDefaultWindow && (
+        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+          Showing the trailing {M.salesWindowDays}-day sales history (through {M.salesDateMax ? M.salesDateMax.toISOString().slice(0, 10) : "--"}) —
+          this is also what Buy Signals is based on. Pick a custom date range above to override.
+        </div>
+      )}
       {/* ── KPIs ── */}
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))" }}>
         <Stat label="Units sold" value={M.salesUnits} />
@@ -1427,6 +1625,35 @@ function SalesTab({ M, filters }) {
       <Panel title="By inventory type">
         <ItemTable rows={M.salesByType} cols={[["type","Type"],["units","Units"],["profit","Profit $",fmtMoney]]} />
       </Panel>
+
+      {/* ── By brand & condition ── */}
+      <Panel title="By brand & condition" note={M.hasCondition ? "new vs. used" : "needs a condition column on sales"}>
+        {!M.hasCondition
+          ? <Locked msg="Add a 'Condition' column (New / Used) to your sales export to break this down." />
+          : <ItemTable rows={applyFilters(M.salesByBrandCondition, filters)} cols={[
+              ["brand","Brand"],["condition","Condition"],["units","Units"],
+              ["profit","Profit $",fmtMoney],["profitPct","Margin %",fmtPct],
+            ]} />}
+      </Panel>
+
+      {/* ── By price tier ── */}
+      <Panel title="By price tier" note="sale price ranges">
+        <ResponsiveContainer width="100%" height={barH(M.salesByPriceTier.length, 30, 160)}>
+          <BarChart data={M.salesByPriceTier} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+            <CartesianGrid stroke={C.line} horizontal={false} />
+            <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} />
+            <YAxis type="category" dataKey="tier" width={yAxisW(M.salesByPriceTier, "tier", 80)} tick={{ fill: C.dim, fontSize: 11 }} />
+            <Tooltip {...chartTip} formatter={(v, n) => n === "Profit $" ? fmtMoney(v) : v} />
+            <Bar dataKey="units" name="Units" fill={C.gold} radius={[0, 4, 4, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+        <div className="mt-3">
+          <ItemTable rows={M.salesByPriceTier} cols={[
+            ["tier","Price tier"],["units","Units"],["revenue","Revenue",fmtMoney],
+            ["profit","Profit $",fmtMoney],["avgProfit","Avg profit $",fmtMoney],["profitPct","Margin %",fmtPct],
+          ]} />
+        </div>
+      </Panel>
     </div>
   );
 }
@@ -1560,6 +1787,12 @@ function BuyTab({ M, filters, includePresold }) {
 
   return (
     <div className="flex flex-col gap-5">
+      {M.usingDefaultWindow && (
+        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+          Based on the trailing {M.salesWindowDays}-day sales history (through {M.salesDateMax ? M.salesDateMax.toISOString().slice(0, 10) : "--"}).
+          Models sold only 1–2 times in that window are excluded from rankings below — not enough history to trust.
+        </div>
+      )}
 
       {/* Q1 */}
       <QuestionCard num="1" question="What is our highest velocity, highest profit product — and are we out?">
