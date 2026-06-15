@@ -265,7 +265,7 @@ const median = (arr) => {
 /* =========================================================================
    METRICS ENGINE
    ========================================================================= */
-function computeMetrics(datasets, dateRange, includePresold) {
+function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) {
   const inv = datasets.find((d) => d.role === "inventory");
   const sal = datasets.find((d) => d.role === "sales");
   const today = new Date();
@@ -427,11 +427,13 @@ function computeMetrics(datasets, dateRange, includePresold) {
       const endT = dateRange.end ? new Date(dateRange.end + "T23:59:59").getTime() : Infinity;
       rows = rows.filter((x) => !x.saleDate || (x.saleDate.getTime() >= startT && x.saleDate.getTime() <= endT));
       out.usingDefaultWindow = false;
-    } else if (out.salesDateMax) {
+    } else if (out.salesDateMax && !includeOlderSales) {
       const windowStartT = out.salesDateMax.getTime() - out.salesWindowDays * 86400000;
       out.windowStart = new Date(windowStartT);
       rows = rows.filter((x) => x.saleDate && x.saleDate.getTime() >= windowStartT);
       out.usingDefaultWindow = true;
+    } else {
+      out.usingDefaultWindow = false;
     }
 
     // "presold" = sold within 0-5 days of purchase — likely flipped before it ever
@@ -831,6 +833,31 @@ function PresoldFilter({ value, onChange, count }) {
   );
 }
 
+/* 45-day sales window toggle */
+function SalesWindowFilter({ value, onChange, windowDays, salesDateMax }) {
+  const opts = [[false, `Last ${windowDays ?? 45} days (default)`], [true, "Include 45+ day sales"]];
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-1">
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50 }}>
+        History
+      </span>
+      {opts.map(([k, lbl]) => (
+        <button key={String(k)} onClick={() => onChange(k)}
+          style={{
+            fontFamily: SANS, borderRadius: 999, fontSize: 12,
+            border: `1px solid ${value === k ? C.gold : C.line}`,
+            background: value === k ? C.gold : "transparent",
+            color: value === k ? C.bg : C.dim,
+          }} className="px-3 py-1">{lbl}</button>
+      ))}
+      <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
+        By default, Sales and Buy Signals use the trailing {windowDays ?? 45} days{salesDateMax ? ` (through ${salesDateMax.toISOString().slice(0, 10)})` : ""}.
+        {value ? " Now showing the full sales history instead." : " Toggle to include older sales."}
+      </span>
+    </div>
+  );
+}
+
 /* sale-date range filter (only relevant when sales data is loaded) */
 function DateRangeFilter({ value, onChange, min, max }) {
   const fmt = (d) => d ? new Date(d).toISOString().slice(0, 10) : undefined;
@@ -934,7 +961,8 @@ export default function WatchBI() {
   const active = datasets.filter((d) => d.role !== "ignore");
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [includePresold, setIncludePresold] = useState(false);
-  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold) : null), [stage, datasets, dateRange, includePresold]);
+  const [includeOlderSales, setIncludeOlderSales] = useState(false);
+  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales) : null), [stage, datasets, dateRange, includePresold, includeOlderSales]);
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
@@ -959,7 +987,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} includeOlderSales={includeOlderSales} setIncludeOlderSales={setIncludeOlderSales} />}
     </div>
   );
 }
@@ -1074,7 +1102,7 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 }
 
 /* ---------- dashboard ---------- */
-function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePresold }) {
+function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePresold, includeOlderSales, setIncludeOlderSales }) {
   const [tab, setTab] = useState(M.hasInv ? "inventory" : "sales");
   const tabs = [
     M.hasInv && ["inventory", "Inventory", Boxes],
@@ -1156,7 +1184,7 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
   const dateActive = !!(dateRange && (dateRange.start || dateRange.end));
   const filtersActiveCount =
     (brandFilterSet ? 1 : 0) + (lineFilterSet ? 1 : 0) + (healthFilterSet ? 1 : 0) +
-    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0);
+    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0) + (includeOlderSales ? 1 : 0);
 
   return (
     <div className="flex flex-col lg:flex-row" style={{ minHeight: 520 }}>
@@ -1194,6 +1222,9 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
                 <ChipFilter label="Health" items={allHealth} selected={selectedHealth} onToggle={toggleHealth} onAll={selectAllHealth}
                   render={(h) => HEALTH_CFG[h]?.label || h} />
                 <StockFilter value={stockFilter} onChange={setStockFilter} />
+                {M.hasSales && (
+                  <SalesWindowFilter value={includeOlderSales} onChange={setIncludeOlderSales} windowDays={M.salesWindowDays} salesDateMax={M.salesDateMax} />
+                )}
                 {M.hasSales && (
                   <PresoldFilter value={includePresold} onChange={setIncludePresold} count={M.presoldCount} />
                 )}
