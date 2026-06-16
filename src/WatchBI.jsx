@@ -265,7 +265,7 @@ const median = (arr) => {
 /* =========================================================================
    METRICS ENGINE
    ========================================================================= */
-function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) {
+function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, invStatusFilter) {
   const inv = datasets.find((d) => d.role === "inventory");
   const sal = datasets.find((d) => d.role === "sales");
   const today = new Date();
@@ -295,11 +295,17 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
         status: r[m.status],
       };
     });
-    out.invCount = items.length;
-    out.invCost = items.reduce((s, x) => s + x.cost, 0);
+    // collect all statuses before filtering so the filter UI can show all options
+    out.invStatuses = [...new Set(items.map((x) => x.status).filter(Boolean))].sort();
+    const filteredItems = (invStatusFilter && invStatusFilter.size)
+      ? items.filter((x) => invStatusFilter.has(x.status))
+      : items;
+
+    out.invCount = filteredItems.length;
+    out.invCost = filteredItems.reduce((s, x) => s + x.cost, 0);
 
     const byBrand = {};
-    items.forEach((x) => {
+    filteredItems.forEach((x) => {
       const k = x.brand;
       byBrand[k] = byBrand[k] || { brand: k, count: 0, cost: 0 };
       byBrand[k].count++; byBrand[k].cost += x.cost;
@@ -308,7 +314,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
     out.invBrandCount = out.invByBrand.length;
 
     const byLine = {};
-    items.filter((x) => x.line).forEach((x) => {
+    filteredItems.filter((x) => x.line).forEach((x) => {
       const lbl = lineLabel(x.brand, x.line);
       const k = x.brand + " · " + lbl;
       byLine[k] = byLine[k] || { key: k, brand: x.brand, line: lbl, count: 0, cost: 0 };
@@ -321,7 +327,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
       { label: "61-90", lo: 61, hi: 90 }, { label: "91-180", lo: 91, hi: 180 },
       { label: "180+", lo: 181, hi: 1e9 },
     ].map((b) => ({ ...b, count: 0, cost: 0 }));
-    items.forEach((x) => {
+    filteredItems.forEach((x) => {
       if (x.age == null) return;
       const b = buckets.find((q) => x.age >= q.lo && x.age <= q.hi);
       if (b) { b.count++; b.cost += x.cost; }
@@ -331,7 +337,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
 
     // ── condition grading (A = fresh, F = aged) ──
     const byGrade = {};
-    items.forEach((x) => {
+    filteredItems.forEach((x) => {
       if (!x.grade) return;
       byGrade[x.grade] = byGrade[x.grade] || { grade: x.grade, count: 0, cost: 0 };
       byGrade[x.grade].count++; byGrade[x.grade].cost += x.cost;
@@ -339,12 +345,12 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
     out.invByGrade = GRADE_BUCKETS.map((b) => byGrade[b.grade] || { grade: b.grade, count: 0, cost: 0 });
 
     // ── top 10 watches to sell: worst grade first, then most cash tied up ──
-    out.needToSell = [...items]
+    out.needToSell = [...filteredItems]
       .filter((x) => x.grade)
       .sort((a, b) => (GRADE_RANK[b.grade] - GRADE_RANK[a.grade]) || (b.cost - a.cost))
       .slice(0, 10);
 
-    const withTarget = items.filter((x) => x.targetWholesale && x.targetWholesale > 0);
+    const withTarget = filteredItems.filter((x) => x.targetWholesale && x.targetWholesale > 0);
     out.projItems = withTarget.length;
     out.projProfit = withTarget.reduce((s, x) => s + (x.targetWholesale - x.cost), 0);
     const pbb = {};
@@ -371,7 +377,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
 
     // current stock count per brand+model (for "are we out" once sales has model)
     const stock = {};
-    items.forEach((x) => {
+    filteredItems.forEach((x) => {
       const key = (x.brandNorm || "") + "|" + String(x.modelName || "").toLowerCase();
       stock[key] = (stock[key] || 0) + 1;
     });
@@ -379,7 +385,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales) 
 
     // current stock count per brand+product line
     const stockByLine = {};
-    items.filter((x) => x.line).forEach((x) => {
+    filteredItems.filter((x) => x.line).forEach((x) => {
       const lbl = lineLabel(x.brand, x.line);
       const key = (x.brandNorm || "") + "|" + lbl.toLowerCase();
       stockByLine[key] = (stockByLine[key] || 0) + 1;
@@ -962,7 +968,11 @@ export default function WatchBI() {
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [includePresold, setIncludePresold] = useState(false);
   const [includeOlderSales, setIncludeOlderSales] = useState(false);
-  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales) : null), [stage, datasets, dateRange, includePresold, includeOlderSales]);
+  // invStatusFilter is derived from selectedInvStatuses after metrics are known;
+  // we bootstrap with null (all) on first render, then the Dashboard passes back
+  // the active set via setInvStatusFilter once the user picks statuses.
+  const [invStatusFilter, setInvStatusFilter] = useState(null);
+  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter) : null), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter]);
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
@@ -987,7 +997,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} includeOlderSales={includeOlderSales} setIncludeOlderSales={setIncludeOlderSales} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} includeOlderSales={includeOlderSales} setIncludeOlderSales={setIncludeOlderSales} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} />}
     </div>
   );
 }
@@ -1102,7 +1112,9 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 }
 
 /* ---------- dashboard ---------- */
-function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePresold, includeOlderSales, setIncludeOlderSales }) {
+const ON_HOLD_STATUS = "On Hold / Reserved";
+
+function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePresold, includeOlderSales, setIncludeOlderSales, invStatusFilter, setInvStatusFilter }) {
   const [tab, setTab] = useState(M.hasInv ? "inventory" : "sales");
   const tabs = [
     M.hasInv && ["inventory", "Inventory", Boxes],
@@ -1174,6 +1186,32 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
   const [stockFilter, setStockFilter] = useState("all");
   const [filtersOpen, setFiltersOpen] = useState(false);
 
+  // inventory status filter — default excludes "On Hold / Reserved"
+  const allStatuses = M.invStatuses || [];
+  const defaultStatuses = useMemo(
+    () => new Set(allStatuses.filter((s) => s !== ON_HOLD_STATUS)),
+    [allStatuses.join("|")]
+  );
+  const [selectedStatuses, setSelectedStatuses] = useState(() => defaultStatuses);
+  // keep selectedStatuses in sync when the loaded dataset changes
+  useEffect(() => { setSelectedStatuses(defaultStatuses); }, [allStatuses.join("|")]);
+  // push the derived filter set up to App so computeMetrics re-runs
+  useEffect(() => {
+    const isAll = selectedStatuses.size === allStatuses.length;
+    setInvStatusFilter(isAll || !allStatuses.length ? null : selectedStatuses);
+  }, [selectedStatuses, allStatuses.join("|")]);
+
+  function toggleStatus(s) {
+    setSelectedStatuses((prev) => {
+      const isAll = prev.size === allStatuses.length;
+      if (isAll) return new Set([s]);
+      const next = new Set(prev);
+      next.has(s) ? next.delete(s) : next.add(s);
+      return next.size ? next : new Set(allStatuses);
+    });
+  }
+  function selectAllStatuses() { setSelectedStatuses(new Set(allStatuses)); }
+  const statusFilterActive = allStatuses.length > 0 && selectedStatuses.size < allStatuses.length;
 
   const filters = {
     brands: brandFilterSet,
@@ -1184,7 +1222,8 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
   const dateActive = !!(dateRange && (dateRange.start || dateRange.end));
   const filtersActiveCount =
     (brandFilterSet ? 1 : 0) + (lineFilterSet ? 1 : 0) + (healthFilterSet ? 1 : 0) +
-    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0) + (includeOlderSales ? 1 : 0);
+    (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0) +
+    (includeOlderSales ? 1 : 0) + (statusFilterActive ? 1 : 0);
 
   return (
     <div className="flex flex-col lg:flex-row" style={{ minHeight: 520 }}>
@@ -1222,6 +1261,9 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
                 <ChipFilter label="Health" items={allHealth} selected={selectedHealth} onToggle={toggleHealth} onAll={selectAllHealth}
                   render={(h) => HEALTH_CFG[h]?.label || h} />
                 <StockFilter value={stockFilter} onChange={setStockFilter} />
+                {allStatuses.length > 0 && (
+                  <ChipFilter label="Status" items={allStatuses} selected={selectedStatuses} onToggle={toggleStatus} onAll={selectAllStatuses} />
+                )}
                 {M.hasSales && (
                   <SalesWindowFilter value={includeOlderSales} onChange={setIncludeOlderSales} windowDays={M.salesWindowDays} salesDateMax={M.salesDateMax} />
                 )}
