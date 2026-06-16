@@ -77,11 +77,11 @@ function guessField(role, header) {
   if (has("brand")) return "brand";
   if (has("model name") || has("title item")) return "modelName";
   if (has("model number") || has("reference") || h === "ref") return "modelNumber";
+  if (has("condition")) return "condition";
   if (role === "sales") {
     if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
     if (has("invoice price") || has("sale price") || has("sold price")) return "salePrice";
     if (h === "profit") return "profit";
-    if (has("condition")) return "condition";
     if (has("inventory type") || h === "type") return "inventoryType";
   }
   if (has("purchase date") || has("purchased date")) return "purchaseDate";
@@ -472,8 +472,11 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       return a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
     })();
 
-    // span of the sales data, in weeks (min 1) — used for sell-through velocity
+    // span of the sales data, in weeks — used for sell-through velocity.
+    // when the default 45-day window is active we always use 45 days as the
+    // denominator so sparse or single-sale windows don't overstate velocity.
     out.salesWeeks = (() => {
+      if (out.usingDefaultWindow) return out.salesWindowDays / 7;
       const ds = rows.map((x) => x.saleDate).filter(Boolean).map((d) => d.getTime());
       if (ds.length < 2) return 1;
       const span = (Math.max(...ds) - Math.min(...ds)) / (7 * 86400000);
@@ -981,9 +984,8 @@ export default function WatchBI() {
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [includePresold, setIncludePresold] = useState(false);
   const [includeOlderSales, setIncludeOlderSales] = useState(false);
-  // invStatusFilter is derived from selectedInvStatuses after metrics are known;
-  // we bootstrap with null (all) on first render, then the Dashboard passes back
-  // the active set via setInvStatusFilter once the user picks statuses.
+  // starts null (all statuses included); Dashboard sets this to exclude
+  // "On Hold / Reserved" after the first metrics render via useEffect.
   const [invStatusFilter, setInvStatusFilter] = useState(null);
   const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter) : null), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter]);
 
@@ -1864,6 +1866,9 @@ function BuyTab({ M, filters, includePresold }) {
 
   const [excludedKeys, setExcludedKeys] = useState(() => new Set());
   const keyOf = (x) => (x.brand || "") + "|" + x.model;
+  // clear exclusions whenever the underlying ranked list changes (e.g. brand filter applied)
+  const velProfKey = velProf.map(keyOf).join(",");
+  useEffect(() => { setExcludedKeys(new Set()); }, [velProfKey]);
   const availableVelProf = velProf.filter((x) => !excludedKeys.has(keyOf(x)));
   const top10VelProf = availableVelProf.slice(0, 10);
   const excludedVelProf = velProf.filter((x) => excludedKeys.has(keyOf(x)));
