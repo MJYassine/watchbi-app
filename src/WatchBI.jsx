@@ -58,7 +58,7 @@ const FIELDS = {
     ["brand", "Brand"], ["modelName", "Model name"], ["modelNumber", "Model / reference #"],
     ["cost", "Cost (total)"], ["purchaseDate", "Purchase date"],
     ["targetWholesale", "Target wholesale price"], ["tagPrice", "Tag price"],
-    ["status", "Status"], ["serial", "Serial #"],
+    ["condition", "Condition — New/Used (optional)"], ["status", "Status"], ["serial", "Serial #"],
   ],
   sales: [
     ["saleDate", "Sale / invoice date"], ["purchaseDate", "Purchase date"],
@@ -292,6 +292,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         tagPrice: tag,
         age,
         grade: ageGrade(age),
+        condition: normalizeCondition(r[m.condition]),
         status: r[m.status],
       };
     });
@@ -312,6 +313,18 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     });
     out.invByBrand = Object.values(byBrand).sort((a, b) => b.cost - a.cost);
     out.invBrandCount = out.invByBrand.length;
+
+    // by brand & condition (new / used)
+    const bbc = {};
+    filteredItems.forEach((x) => {
+      const cond = x.condition || "Unspecified";
+      const k = x.brand + " · " + cond;
+      bbc[k] = bbc[k] || { key: k, brand: x.brand, condition: cond, count: 0, cost: 0 };
+      bbc[k].count++; bbc[k].cost += x.cost;
+    });
+    out.invByBrandCondition = Object.values(bbc)
+      .sort((a, b) => a.brand === b.brand ? a.condition.localeCompare(b.condition) : b.cost - a.cost);
+    out.invHasCondition = filteredItems.some((x) => x.condition && x.condition !== "Unspecified");
 
     const byLine = {};
     filteredItems.filter((x) => x.line).forEach((x) => {
@@ -1380,6 +1393,15 @@ function InventoryTab({ M, filters }) {
               <ItemTable rows={fByLine} cols={[["brand","Brand"],["line","Line"],["count","Items"],["cost","Cost",fmtMoney]]} />
             </div>
           </>)}
+      </Panel>
+
+      {/* ── By brand & condition ── */}
+      <Panel title="By brand & condition" note={M.invHasCondition ? "new vs. used" : "needs a condition column on inventory"}>
+        {!M.invHasCondition
+          ? <Locked msg="Add a 'Condition' column (New / Used) to your inventory export to break this down." />
+          : <ItemTable rows={applyFilters(M.invByBrandCondition, filters)} cols={[
+              ["brand","Brand"],["condition","Condition"],["count","Items"],["cost","Cost",fmtMoney],
+            ]} />}
       </Panel>
 
       {/* ── Aging ── */}
