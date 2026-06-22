@@ -58,7 +58,10 @@ const FIELDS = {
     ["brand", "Brand"], ["modelName", "Model name"], ["modelNumber", "Model / reference #"],
     ["cost", "Cost (total)"], ["purchaseDate", "Purchase date"],
     ["targetWholesale", "Target wholesale price"], ["tagPrice", "Tag price"],
-    ["condition", "Condition — New/Used (optional)"], ["status", "Status"], ["serial", "Serial #"],
+    ["condition", "Condition — New/Used (optional)"], ["status", "Status"],
+    ["invType", "Inventory type — Owned/Consignment/Memo (optional)"],
+    ["paymentStatus", "Payment status — Paid/Unpaid/Voided (optional)"],
+    ["serial", "Serial #"],
   ],
   sales: [
     ["saleDate", "Sale / invoice date"], ["purchaseDate", "Purchase date"],
@@ -66,7 +69,7 @@ const FIELDS = {
     ["profit", "Profit $ (optional)"], ["brand", "Brand (optional)"],
     ["modelName", "Model name (optional)"], ["modelNumber", "Model / reference # (optional)"],
     ["inventoryType", "Inventory type (optional)"], ["condition", "Condition — New/Used (optional)"],
-    ["serial", "Serial # (optional)"],
+    ["shippingState", "Shipping state (optional)"], ["serial", "Serial # (optional)"],
   ],
 };
 
@@ -78,11 +81,16 @@ function guessField(role, header) {
   if (has("model name") || has("title item")) return "modelName";
   if (has("model number") || has("reference") || h === "ref") return "modelNumber";
   if (has("condition")) return "condition";
+  if (has("payment") || has("paid")) return role === "inventory" ? "paymentStatus" : null;
   if (role === "sales") {
     if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
     if (has("invoice price") || has("sale price") || has("sold price")) return "salePrice";
     if (h === "profit") return "profit";
+    if ((has("ship") && has("state")) || h === "state" || has("ship to state")) return "shippingState";
     if (has("inventory type") || h === "type") return "inventoryType";
+  }
+  if (role === "inventory") {
+    if (has("inventory type") || h === "type") return "invType";
   }
   if (has("purchase date") || has("purchased date")) return "purchaseDate";
   if (has("cogs") || has("total cost") || h === "cost") return "cost";
@@ -144,6 +152,19 @@ function normalizeCondition(v) {
   if (s.includes("used") || s.includes("pre-owned") || s.includes("preowned") || s.includes("pre owned") || s.includes("second")) return "Used";
   return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
 }
+
+/* normalize a free-text payment value to Paid / Unpaid / Voided */
+function normalizePayment(v) {
+  if (v == null || v === "") return "Unspecified";
+  const s = String(v).trim().toLowerCase();
+  if (!s) return "Unspecified";
+  if (s.includes("void") || s.includes("cancel")) return "Voided";
+  if (s.includes("unpaid") || s.includes("not paid") || s.includes("due") || s.includes("outstanding") || s === "no") return "Unpaid";
+  if (s.includes("paid") || s === "yes") return "Paid";
+  return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
+}
+const isMemoType = (t) => /memo/i.test(String(t || ""));
+const isConsignmentType = (t) => /consign/i.test(String(t || ""));
 
 /* price tier buckets for sale price breakdowns */
 const PRICE_TIERS = [
@@ -274,26 +295,33 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
   /* ----- inventory ----- */
   if (inv) {
     const m = inv.mapping;
-    const items = inv.rows.map((r) => {
+    const items = inv.rows.map((r, i) => {
       const cost = toNum(r[m.cost]);
       const tw = toNum(r[m.targetWholesale]);
       const tag = toNum(r[m.tagPrice]);
       const brandNorm = normalizeBrand(r[m.brand]);
       const pd = toDate(r[m.purchaseDate]);
       const age = pd ? daysBetween(pd, today) : null;
+      const invType = (r[m.invType] && String(r[m.invType]).trim()) || null;
       return {
+        _id: i,
         brand: r[m.brand] || "Unknown",
         brandNorm,
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName],
         modelNumber: r[m.modelNumber] || null,
         cost: cost || 0,
+        costMissing: cost == null || cost === 0,
+        purchaseDate: pd,
         targetWholesale: tw,
         tagPrice: tag,
         age,
         grade: ageGrade(age),
         condition: normalizeCondition(r[m.condition]),
-        status: r[m.status],
+        status: r[m.status] || null,
+        invType,
+        invTypeLabel: invType || "Unspecified",
+        paymentStatus: normalizePayment(r[m.paymentStatus]),
       };
     });
     // collect all statuses before filtering so the filter UI can show all options
@@ -348,20 +376,52 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     out.aging = buckets;
     out.agedValue = buckets.filter((b) => b.lo >= 91).reduce((s, b) => s + b.cost, 0);
 
-    // ── condition grading (A = fresh, F = aged) ──
+    // ── inventory quality grade (A = fresh, F = aged) ──
     const byGrade = {};
     filteredItems.forEach((x) => {
       if (!x.grade) return;
-      byGrade[x.grade] = byGrade[x.grade] || { grade: x.grade, count: 0, cost: 0 };
-      byGrade[x.grade].count++; byGrade[x.grade].cost += x.cost;
+      byGrade[x.grade] = byGrade[x.grade] || { grade: x.grade, count: 0, cost: 0, items: [] };
+      byGrade[x.grade].count++; byGrade[x.grade].cost += x.cost; byGrade[x.grade].items.push(x);
     });
-    out.invByGrade = GRADE_BUCKETS.map((b) => byGrade[b.grade] || { grade: b.grade, count: 0, cost: 0 });
+    out.invByGrade = GRADE_BUCKETS.map((b) => byGrade[b.grade] || { grade: b.grade, count: 0, cost: 0, items: [] });
 
-    // ── top 10 watches to sell: worst grade first, then most cash tied up ──
-    out.needToSell = [...filteredItems]
+    // ── watches to sell: worst grade first, then most cash tied up ──
+    out.needToSellRanked = [...filteredItems]
       .filter((x) => x.grade)
-      .sort((a, b) => (GRADE_RANK[b.grade] - GRADE_RANK[a.grade]) || (b.cost - a.cost))
-      .slice(0, 10);
+      .sort((a, b) => (GRADE_RANK[b.grade] - GRADE_RANK[a.grade]) || (b.cost - a.cost));
+    out.needToSell = out.needToSellRanked.slice(0, 10);
+
+    // ── data quality: how many items are missing each key field ──
+    const dqDefs = [
+      { key: "status", label: "Inventory status", missing: (x) => !x.status },
+      { key: "invType", label: "Inventory type", missing: (x) => !x.invType },
+      { key: "cost", label: "Purchase price", missing: (x) => x.costMissing },
+      { key: "purchaseDate", label: "Purchase date", missing: (x) => x.purchaseDate == null },
+      { key: "targetWholesale", label: "Wholesale target", missing: (x) => x.targetWholesale == null || x.targetWholesale <= 0 },
+    ];
+    out.dataQuality = dqDefs.map((d) => {
+      const missingItems = filteredItems.filter(d.missing);
+      return {
+        key: d.key, field: d.label, missing: missingItems.length,
+        present: filteredItems.length - missingItems.length, items: missingItems,
+      };
+    });
+
+    // ── liabilities (computed on the FULL inventory, independent of status filter) ──
+    // unpaid: payment marked unpaid, excluding memo items and voided items
+    const unpaid = items.filter((x) => x.paymentStatus === "Unpaid" && !isMemoType(x.invType));
+    out.unpaidItems = [...unpaid].sort((a, b) => b.cost - a.cost);
+    out.unpaidLiability = unpaid.reduce((s, x) => s + x.cost, 0);
+    out.unpaidCount = unpaid.length;
+
+    // consignment: unsold consignment stock (everything in inventory is unsold), not voided
+    const consign = items.filter((x) => isConsignmentType(x.invType) && x.paymentStatus !== "Voided");
+    out.consignmentItems = [...consign].sort((a, b) => b.cost - a.cost);
+    out.consignmentLiability = consign.reduce((s, x) => s + x.cost, 0);
+    out.consignmentCount = consign.length;
+
+    out.hasPaymentStatus = items.some((x) => x.paymentStatus && x.paymentStatus !== "Unspecified");
+    out.hasInvType = items.some((x) => x.invType);
 
     const withTarget = filteredItems.filter((x) => x.targetWholesale && x.targetWholesale > 0);
     out.projItems = withTarget.length;
@@ -430,8 +490,12 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         type: r[m.inventoryType] || "Unspecified",
         condition: normalizeCondition(r[m.condition]),
         priceTier: priceTierLabel(price),
+        shippingState: (r[m.shippingState] && String(r[m.shippingState]).trim()) || "Unspecified",
       };
     });
+    // keep the full mapped set (pre-window, pre-presold) for tax/state liability,
+    // which is a cumulative financial view rather than a recent-performance view
+    const allSalesRows = rows;
     // overall date span of the sales data (used for the date-range picker bounds)
     const allSaleDates = rows.map((x) => x.saleDate).filter(Boolean);
     out.salesDateMin = allSaleDates.length ? new Date(Math.min(...allSaleDates.map((d) => d.getTime()))) : null;
@@ -516,6 +580,19 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
         medianMargin: median(b._m),
       }));
+
+    // ── sales tax potential liability: total sales per shipping state (all history) ──
+    const bst = {};
+    allSalesRows.forEach((x) => {
+      const st = x.shippingState || "Unspecified";
+      bst[st] = bst[st] || { state: st, units: 0, revenue: 0 };
+      bst[st].units++; bst[st].revenue += x.price;
+    });
+    // sort by revenue desc but always push "Unspecified" to the bottom
+    out.salesByState = Object.values(bst).sort((a, b) =>
+      a.state === "Unspecified" ? 1 : b.state === "Unspecified" ? -1 : b.revenue - a.revenue);
+    out.hasShippingState = allSalesRows.some((x) => x.shippingState && x.shippingState !== "Unspecified");
+    out.taxableRevenue = out.salesByState.reduce((s, x) => s + x.revenue, 0);
 
     // brand-level (only if brand present on sales)
     out.salesHasBrand = rows.some((x) => x.brand);
@@ -650,11 +727,18 @@ function metricsForChat(M) {
       projected_profit_total: Math.round(M.projProfit),
       projected_profit_note: "only computed on items that have a target wholesale price",
       by_grade: M.invByGrade.map((b) => ({ grade: b.grade, items: b.count, cost: Math.round(b.cost) })),
-      grade_note: "A = 0-30 days in stock, B = 31-60, C = 61-90, D = 91-180, F = 180+",
+      grade_note: "Inventory quality grade. A = 0-30 days in stock, B = 31-60, C = 61-90, D = 91-180, F = 180+",
       top_to_sell: (M.needToSell || []).map((b) => ({
         brand: b.brand, model: b.modelName, ref: b.modelNumber,
         grade: b.grade, days_in_stock: b.age, cost: Math.round(b.cost),
       })),
+      data_quality: (M.dataQuality || []).map((d) => ({ field: d.field, missing: d.missing, present: d.present })),
+      unpaid_liability: Math.round(M.unpaidLiability || 0),
+      unpaid_count: M.unpaidCount || 0,
+      unpaid_note: "cost of unpaid watches, excluding memo and voided items",
+      consignment_liability: Math.round(M.consignmentLiability || 0),
+      consignment_count: M.consignmentCount || 0,
+      consignment_note: "cost of unsold consignment inventory",
     };
   }
   if (M.hasSales) {
@@ -673,6 +757,10 @@ function metricsForChat(M) {
       by_brand_condition: (M.salesByBrandCondition || []).map((b) => ({
         brand: b.brand, condition: b.condition, units: b.units, profit: Math.round(b.profit), margin_pct: b.profitPct != null ? +b.profitPct.toFixed(1) : null,
       })),
+      sales_tax_by_state: (M.salesByState || []).map((b) => ({
+        state: b.state, units: b.units, revenue: Math.round(b.revenue),
+      })),
+      sales_tax_note: "total sales revenue per shipping state (all history); 'Unspecified' = no state recorded",
       monthly: M.monthly,
     };
     if (M.salesHasBrand) {
@@ -735,6 +823,24 @@ function Locked({ msg }) {
     <div style={{ color: C.faint, fontFamily: SANS, border: `1px dashed ${C.line}`, borderRadius: 12 }}
       className="p-6 flex items-center gap-3 text-sm">
       <Lock size={18} /> <span>{msg}</span>
+    </div>
+  );
+}
+/* secondary tab row, sits under the main Inventory / Sales / Buy tabs */
+function SubTabs({ tabs, value, onChange }) {
+  return (
+    <div className="flex gap-1 mb-4 flex-wrap" style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 8 }}>
+      {tabs.map(([k, label]) => (
+        <button key={k} onClick={() => onChange(k)}
+          style={{
+            fontFamily: SANS, borderRadius: 8, fontSize: 12.5,
+            background: value === k ? C.panel2 : "transparent",
+            color: value === k ? C.gold : C.dim,
+            border: `1px solid ${value === k ? C.line : "transparent"}`,
+          }} className="px-3 py-1.5">
+          {label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -1343,7 +1449,15 @@ function SectionLabel({ children }) {
   );
 }
 
+// columns used to list individual watches in drill-downs
+const WATCH_COLS = [
+  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+  ["grade","Grade",(v) => <GradeBadge grade={v} />],
+  ["age","Days in stock"],["cost","Cost",fmtMoney],
+];
+
 function InventoryTab({ M, filters }) {
+  const [sub, setSub] = useState("overview");
   const fByBrand = applyFilters(M.invByBrand, filters);
   const fByLine = applyFilters(M.invByLine, filters);
   const fProjByBrand = applyFilters(M.projByBrand, filters);
@@ -1353,9 +1467,29 @@ function InventoryTab({ M, filters }) {
   const fProjProfit = fProjByModel.reduce((s, r) => s + (r.profit || 0), 0);
   const anyFilterActive = !!(filters.brands || filters.lines || filters.health || filters.stock !== "all");
 
+  // grade & data-quality drill-down state
+  const [expandedGrade, setExpandedGrade] = useState(null);
+  const [expandedDQ, setExpandedDQ] = useState(null);
+
+  // top watches to sell — exclude/refill
+  const [excludedSell, setExcludedSell] = useState(() => new Set());
+  const sellRanked = M.needToSellRanked || [];
+  const sellRankedKey = sellRanked.map((x) => x._id).join(",");
+  useEffect(() => { setExcludedSell(new Set()); }, [sellRankedKey]);
+  const visibleSell = sellRanked.filter((x) => !excludedSell.has(x._id)).slice(0, 10);
+  const excludedSellItems = sellRanked.filter((x) => excludedSell.has(x._id));
+
+  const subTabs = [
+    ["overview", "Overview"],
+    ["grading", "Grading & Aging"],
+    ["quality", "Data Quality"],
+    ["liabilities", "Liabilities"],
+    ["projections", "Projections"],
+  ];
+
   return (
     <div className="flex flex-col gap-5">
-      {/* ── KPIs ── */}
+      {/* ── KPIs (always visible) ── */}
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
         <Stat label="Items in stock" value={fInvCount} />
         <Stat label="Capital tied up" value={fmtMoney(fInvCost)} />
@@ -1364,141 +1498,259 @@ function InventoryTab({ M, filters }) {
         {M.projItems > 0 && <Stat label="Projected profit" value={fmtMoney(fProjProfit)} sub={`${fProjByModel.length} priced items`} />}
       </div>
 
-      {/* ── By Brand ── */}
-      <Panel title="Inventory by brand" note="cost on the shelf">
-        <ResponsiveContainer width="100%" height={barH(fByBrand.length)}>
-          <BarChart data={fByBrand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
-            <CartesianGrid stroke={C.line} horizontal={false} />
-            <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
-            <YAxis type="category" dataKey="brand" width={yAxisW(fByBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
-            <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
-            <Bar dataKey="cost" name="Cost" fill={C.gold} radius={[0, 4, 4, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </Panel>
+      <SubTabs tabs={subTabs} value={sub} onChange={setSub} />
 
-      {/* ── By Product Line ── */}
-      <Panel title="By product line" note="Rolex · Patek Philippe · Audemars Piguet · Omega">
-        {fByLine.length === 0
-          ? <Locked msg="No items matched a known product line for the four focus brands." />
-          : (<>
-            <ResponsiveContainer width="100%" height={barH(fByLine.length, 34, 160)}>
-              <BarChart data={fByLine} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
-                <CartesianGrid stroke={C.line} horizontal={false} />
-                <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
-                <YAxis type="category" dataKey="line" width={yAxisW(fByLine, "line")} tick={{ fill: C.dim, fontSize: 11 }} />
-                <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
-                <Bar dataKey="cost" name="Cost" fill={C.blue} radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-            <div className="mt-3">
-              <ItemTable rows={fByLine} cols={[["brand","Brand"],["line","Line"],["count","Items"],["cost","Cost",fmtMoney]]} />
-            </div>
-          </>)}
-      </Panel>
-
-      {/* ── By brand & condition ── */}
-      <Panel title="By brand & condition" note={M.invHasCondition ? "new vs. used" : "needs a condition column on inventory"}>
-        {!M.invHasCondition
-          ? <Locked msg="Add a 'Condition' column (New / Used) to your inventory export to break this down." />
-          : <ItemTable rows={applyFilters(M.invByBrandCondition, filters)} cols={[
-              ["brand","Brand"],["condition","Condition"],["count","Items"],["cost","Cost",fmtMoney],
-            ]} />}
-      </Panel>
-
-      {/* ── Aging ── */}
-      <Panel title="Age of inventory" note="days stock held">
-        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={M.aging} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <CartesianGrid stroke={C.line} vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: C.dim, fontSize: 11 }} />
-              <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
-              <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
-              <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]}>
-                {M.aging.map((b, i) => <Cell key={i} fill={b.lo >= 91 ? C.red : b.lo >= 61 ? "#c8863a" : C.gold} />)}
-              </Bar>
+      {/* ════ OVERVIEW ════ */}
+      {sub === "overview" && (<>
+        <Panel title="Inventory by brand" note="cost on the shelf">
+          <ResponsiveContainer width="100%" height={barH(fByBrand.length)}>
+            <BarChart data={fByBrand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+              <CartesianGrid stroke={C.line} horizontal={false} />
+              <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+              <YAxis type="category" dataKey="brand" width={yAxisW(fByBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+              <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+              <Bar dataKey="cost" name="Cost" fill={C.gold} radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
-          <div>
-            <ItemTable rows={M.aging.map(b => ({ ...b, label: b.label + " days" }))}
-              cols={[["label","Age bucket"],["count","Items"],["cost","Cost tied up",fmtMoney]]} />
-            {M.agedValue > 0 && (
-              <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginTop: 10 }}>
-                ⚠ {fmtMoney(M.agedValue)} sitting 91+ days
+        </Panel>
+
+        <Panel title="By product line" note="Rolex · Patek Philippe · Audemars Piguet · Omega">
+          {fByLine.length === 0
+            ? <Locked msg="No items matched a known product line for the four focus brands." />
+            : (<>
+              <ResponsiveContainer width="100%" height={barH(fByLine.length, 34, 160)}>
+                <BarChart data={fByLine} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                  <CartesianGrid stroke={C.line} horizontal={false} />
+                  <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                  <YAxis type="category" dataKey="line" width={yAxisW(fByLine, "line")} tick={{ fill: C.dim, fontSize: 11 }} />
+                  <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+                  <Bar dataKey="cost" name="Cost" fill={C.blue} radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+              <div className="mt-3">
+                <ItemTable rows={fByLine} cols={[["brand","Brand"],["line","Line"],["count","Items"],["cost","Cost",fmtMoney]]} />
               </div>
-            )}
+            </>)}
+        </Panel>
+
+        <Panel title="By brand & condition" note={M.invHasCondition ? "new vs. used" : "needs a condition column on inventory"}>
+          {!M.invHasCondition
+            ? <Locked msg="Add a 'Condition' column (New / Used) to your inventory export to break this down." />
+            : <ItemTable rows={applyFilters(M.invByBrandCondition, filters)} cols={[
+                ["brand","Brand"],["condition","Condition"],["count","Items"],["cost","Cost",fmtMoney],
+              ]} />}
+        </Panel>
+      </>)}
+
+      {/* ════ GRADING & AGING ════ */}
+      {sub === "grading" && (<>
+        <Panel title="Inventory quality grade (A → F)" note="A = just bought, F = sitting longest">
+          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+            Every item is graded by how long it's been in stock: A (0–30 days), B (31–60), C (61–90), D (91–180), F (180+).
+            Grades naturally fall as a watch sits longer without selling. Click a grade to see the watches in it.
           </div>
-        </div>
-      </Panel>
-
-      {/* ── Condition grading ── */}
-      <Panel title="Condition grade (A → F)" note="A = just bought, F = sitting longest">
-        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-          Every item is graded by how long it's been in stock: A (0–30 days), B (31–60), C (61–90), D (91–180), F (180+).
-          Grades naturally fall as a watch sits longer without selling.
-        </div>
-        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={M.invByGrade} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <CartesianGrid stroke={C.line} vertical={false} />
-              <XAxis dataKey="grade" tick={{ fill: C.dim, fontSize: 11 }} />
-              <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
-              <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
-              <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]}>
-                {M.invByGrade.map((b, i) => <Cell key={i} fill={(GRADE_CFG[b.grade] || {}).bg || C.gold} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-          <ItemTable rows={M.invByGrade} cols={[
-            ["grade","Grade",(v) => <GradeBadge grade={v} />],
-            ["count","Items"],["cost","Cost tied up",fmtMoney],
-          ]} />
-        </div>
-      </Panel>
-
-      {/* ── Top 10 to sell ── */}
-      <Panel title="Top 10 watches to sell" note="worst grade + most cash tied up first">
-        {M.needToSell && M.needToSell.length > 0 ? (
-          <>
-            <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-              These are holding the most cash for the longest. Moving these frees up capital to reinvest in faster, more profitable watches.
-            </div>
-            <ItemTable rows={M.needToSell} cols={[
-              ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
-              ["grade","Grade",(v) => <GradeBadge grade={v} />],
-              ["age","Days in stock"],["cost","Cost",fmtMoney],
-            ]} />
-          </>
-        ) : <Locked msg="No graded inventory items available." />}
-      </Panel>
-
-      {/* ── Projected Profit ── */}
-      {M.projItems === 0
-        ? <Panel title="Projected profit"><Locked msg="No items have a target wholesale price yet. Add 'Target Wholesale Price' to your inventory export." /></Panel>
-        : fProjByModel.length === 0
-        ? <Panel title="Projected profit"><Locked msg="No priced items match the current brand filter." /></Panel>
-        : (<>
-          <Panel title="Projected profit by brand" note={`${fProjByModel.length} of ${M.projItems} priced items`}>
-            <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(fProjProfit)} total</div>
-            <ResponsiveContainer width="100%" height={barH(fProjByBrand.length, 38, 140)}>
-              <BarChart data={fProjByBrand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
-                <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
-                <YAxis type="category" dataKey="brand" width={yAxisW(fProjByBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
-                <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
-                <Bar dataKey="profit" name="Projected profit" fill={C.green} radius={[0, 4, 4, 0]} />
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={M.invByGrade} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                <CartesianGrid stroke={C.line} vertical={false} />
+                <XAxis dataKey="grade" tick={{ fill: C.dim, fontSize: 11 }} />
+                <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
+                <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+                <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]} cursor="pointer"
+                  onClick={(d) => { const g = d?.payload?.grade ?? d?.grade; if (g) setExpandedGrade((p) => p === g ? null : g); }}>
+                  {M.invByGrade.map((b, i) => <Cell key={i} fill={(GRADE_CFG[b.grade] || {}).bg || C.gold} />)}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
-          </Panel>
+            <ItemTable rows={M.invByGrade}
+              getRowKey={(r) => r.grade}
+              expandedKey={expandedGrade}
+              onRowClick={(r) => setExpandedGrade((p) => p === r.grade ? null : r.grade)}
+              renderExpanded={(r) => (
+                r.items.length === 0
+                  ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No watches in grade {r.grade}.</div>
+                  : <div>
+                      <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                        Grade {r.grade} — {r.items.length} {r.items.length === 1 ? "watch" : "watches"}
+                      </div>
+                      <ItemTable rows={r.items} cols={WATCH_COLS} />
+                    </div>
+              )}
+              cols={[
+                ["grade","Grade",(v) => <GradeBadge grade={v} />],
+                ["count","Items"],["cost","Cost tied up",fmtMoney],
+              ]} />
+          </div>
+        </Panel>
 
-          <Panel title="Projected profit by model" note="based on target wholesale price">
-            <ItemTable rows={fProjByModel.slice(0, 30)} cols={[
-              ["brand","Brand"],["model","Model"],["count","Items"],
-              ["profit","Proj. Profit",fmtMoney],
-              ["marginPct","Margin %",(v) => fmtPct(v)],
-            ]} />
-          </Panel>
-        </>)}
+        <Panel title="Age of inventory" note="days stock held">
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={M.aging} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                <CartesianGrid stroke={C.line} vertical={false} />
+                <XAxis dataKey="label" tick={{ fill: C.dim, fontSize: 11 }} />
+                <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
+                <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+                <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]}>
+                  {M.aging.map((b, i) => <Cell key={i} fill={b.lo >= 91 ? C.red : b.lo >= 61 ? "#c8863a" : C.gold} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            <div>
+              <ItemTable rows={M.aging.map(b => ({ ...b, label: b.label + " days" }))}
+                cols={[["label","Age bucket"],["count","Items"],["cost","Cost tied up",fmtMoney]]} />
+              {M.agedValue > 0 && (
+                <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginTop: 10 }}>
+                  ⚠ {fmtMoney(M.agedValue)} sitting 91+ days
+                </div>
+              )}
+            </div>
+          </div>
+        </Panel>
+
+        <Panel title="Top 10 watches to sell" note="worst grade + most cash tied up first">
+          {visibleSell.length > 0 ? (
+            <>
+              <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+                These are holding the most cash for the longest. Moving them frees up capital for faster, more profitable watches.
+                Click "Exclude" to drop one — the next-ranked watch takes its place.
+              </div>
+              <ItemTable rows={visibleSell} getRowKey={(r) => r._id} cols={[
+                ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+                ["grade","Grade",(v) => <GradeBadge grade={v} />],
+                ["age","Days in stock"],["cost","Cost",fmtMoney],
+                ["_id","",(_, r) => (
+                  <button onClick={() => setExcludedSell((prev) => new Set(prev).add(r._id))}
+                    style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: C.dim }}
+                    className="px-3 py-1">Exclude</button>
+                )],
+              ]} />
+              {excludedSellItems.length > 0 && (
+                <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }} className="mt-3">
+                  <div className="mb-1">Excluded:</div>
+                  <div className="flex flex-wrap gap-2">
+                    {excludedSellItems.map((x) => (
+                      <button key={x._id}
+                        onClick={() => setExcludedSell((prev) => { const n = new Set(prev); n.delete(x._id); return n; })}
+                        style={{ fontFamily: SANS, fontSize: 12, borderRadius: 999, border: `1px solid ${C.line}`, background: "transparent", color: C.dim }}
+                        className="px-3 py-1">{x.brand} — {x.modelName || x.modelNumber || "watch"} ✕</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : <Locked msg="No graded inventory items available." />}
+        </Panel>
+      </>)}
+
+      {/* ════ DATA QUALITY ════ */}
+      {sub === "quality" && (
+        <Panel title="Data quality" note="missing fields by watch">
+          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+            How complete is each watch record. Click a field to see which watches are missing it, so you can clean up the source data.
+          </div>
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+            <ResponsiveContainer width="100%" height={barH(M.dataQuality.length, 34, 180)}>
+              <BarChart data={M.dataQuality} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                <CartesianGrid stroke={C.line} horizontal={false} />
+                <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} />
+                <YAxis type="category" dataKey="field" width={yAxisW(M.dataQuality, "field", 120)} tick={{ fill: C.dim, fontSize: 11 }} />
+                <Tooltip {...chartTip} />
+                <Bar dataKey="missing" name="Missing" fill={C.red} radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <ItemTable rows={M.dataQuality}
+              getRowKey={(r) => r.key}
+              expandedKey={expandedDQ}
+              onRowClick={(r) => setExpandedDQ((p) => p === r.key ? null : r.key)}
+              renderExpanded={(r) => (
+                r.items.length === 0
+                  ? <div style={{ color: C.green, fontFamily: SANS, fontSize: 12 }}>✓ All watches have {r.field.toLowerCase()}.</div>
+                  : <div>
+                      <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                        Missing {r.field.toLowerCase()} — {r.items.length} {r.items.length === 1 ? "watch" : "watches"}
+                      </div>
+                      <ItemTable rows={r.items} cols={WATCH_COLS} />
+                    </div>
+              )}
+              cols={[
+                ["field","Field"],["missing","Missing"],["present","Present"],
+              ]} />
+          </div>
+        </Panel>
+      )}
+
+      {/* ════ LIABILITIES ════ */}
+      {sub === "liabilities" && (<>
+        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+          Liabilities reflect the full inventory file and are not affected by the brand/status filters above.
+        </div>
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
+          <Stat label="Unpaid liability" value={fmtMoney(M.unpaidLiability)} sub={`${M.unpaidCount} watches · excl. memo & voided`} />
+          <Stat label="Consignment liability" value={fmtMoney(M.consignmentLiability)} sub={`${M.consignmentCount} unsold consignment`} />
+        </div>
+
+        <Panel title="Unpaid inventory liability" note="unpaid watches, excluding memo & voided">
+          {!M.hasPaymentStatus
+            ? <Locked msg="Add a 'Payment status' column (Paid / Unpaid / Voided) to your inventory export to track this." />
+            : M.unpaidItems.length === 0
+            ? <div style={{ color: C.green, fontFamily: SANS, fontSize: 13 }}>✓ No unpaid watches. Nothing owed.</div>
+            : (<>
+                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.unpaidLiability)} owed</div>
+                <ItemTable rows={M.unpaidItems} cols={[
+                  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+                  ["invTypeLabel","Type"],["cost","Cost owed",fmtMoney],
+                ]} />
+              </>)}
+        </Panel>
+
+        <Panel title="Consignment liability" note="unsold consignment inventory">
+          {!M.hasInvType
+            ? <Locked msg="Add an 'Inventory type' column (Owned / Consignment / Memo) to your inventory export to track this." />
+            : M.consignmentItems.length === 0
+            ? <div style={{ color: C.dim, fontFamily: SANS, fontSize: 13 }}>No consignment inventory on hand.</div>
+            : (<>
+                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.consignmentLiability)} in consignment stock</div>
+                <ItemTable rows={M.consignmentItems} cols={[
+                  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+                  ["age","Days in stock"],["cost","Cost",fmtMoney],
+                ]} />
+              </>)}
+        </Panel>
+
+        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+          Sales tax potential liability (by shipping state) lives under the <span style={{ color: C.gold }}>Sales → Tax</span> tab.
+        </div>
+      </>)}
+
+      {/* ════ PROJECTIONS ════ */}
+      {sub === "projections" && (
+        M.projItems === 0
+          ? <Panel title="Projected profit"><Locked msg="No items have a target wholesale price yet. Add 'Target Wholesale Price' to your inventory export." /></Panel>
+          : fProjByModel.length === 0
+          ? <Panel title="Projected profit"><Locked msg="No priced items match the current brand filter." /></Panel>
+          : (<>
+            <Panel title="Projected profit by brand" note={`${fProjByModel.length} of ${M.projItems} priced items`}>
+              <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(fProjProfit)} total</div>
+              <ResponsiveContainer width="100%" height={barH(fProjByBrand.length, 38, 140)}>
+                <BarChart data={fProjByBrand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                  <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                  <YAxis type="category" dataKey="brand" width={yAxisW(fProjByBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
+                  <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+                  <Bar dataKey="profit" name="Projected profit" fill={C.green} radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </Panel>
+
+            <Panel title="Projected profit by model" note="based on target wholesale price">
+              <ItemTable rows={fProjByModel.slice(0, 30)} cols={[
+                ["brand","Brand"],["model","Model"],["count","Items"],
+                ["profit","Proj. Profit",fmtMoney],
+                ["marginPct","Margin %",(v) => fmtPct(v)],
+              ]} />
+            </Panel>
+          </>)
+      )}
     </div>
   );
 }
@@ -1518,6 +1770,12 @@ function SalesTab({ M, filters }) {
     lineTableRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
   const fVelocity = applyFilters(M.byVelocity, filters);
+  const [sub, setSub] = useState("performance");
+  const salesSubTabs = [
+    ["performance", "Performance"],
+    ["breakdowns", "Breakdowns"],
+    ["tax", "Tax"],
+  ];
   return (
     <div className="flex flex-col gap-5">
       {M.usingDefaultWindow && (
@@ -1535,6 +1793,10 @@ function SalesTab({ M, filters }) {
         <Stat label="Median days to sell" value={M.medianDays ?? "--"} sub={M.meanDays ? `avg ${Math.round(M.meanDays)} days` : ""} />
       </div>
 
+      <SubTabs tabs={salesSubTabs} value={sub} onChange={setSub} />
+
+      {/* ════ PERFORMANCE ════ */}
+      {sub === "performance" && (<>
       {/* ── Over time ── */}
       <Panel title="Sales over time" note="units & profit by month">
         <ResponsiveContainer width="100%" height={270}>
@@ -1596,7 +1858,10 @@ function SalesTab({ M, filters }) {
             </div>
           </>)}
       </Panel>
+      </>)}
 
+      {/* ════ BREAKDOWNS ════ */}
+      {sub === "breakdowns" && (<>
       {/* ── By Product Line ── */}
       <Panel title="By product line" note={needsBrand ? "needs brand column" : "Rolex · Patek · AP · Omega"}>
         {needsBrand
@@ -1687,7 +1952,10 @@ function SalesTab({ M, filters }) {
             ]} />
           </>)}
       </Panel>
+      </>)}
 
+      {/* ════ PERFORMANCE (velocity) ════ */}
+      {sub === "performance" && (<>
       {/* ── Velocity ── */}
       <Panel title="Velocity — how quickly do we sell?" note="median days to sell">
         {needsBrand
@@ -1717,7 +1985,10 @@ function SalesTab({ M, filters }) {
             </div>
           </>)}
       </Panel>
+      </>)}
 
+      {/* ════ BREAKDOWNS (continued) ════ */}
+      {sub === "breakdowns" && (<>
       {/* ── Inventory type breakdown ── */}
       <Panel title="By inventory type">
         <ItemTable rows={M.salesByType} cols={[["type","Type"],["units","Units"],["profit","Profit $",fmtMoney]]} />
@@ -1751,6 +2022,37 @@ function SalesTab({ M, filters }) {
           ]} />
         </div>
       </Panel>
+      </>)}
+
+      {/* ════ TAX ════ */}
+      {sub === "tax" && (
+        <Panel title="Sales tax potential liability" note="total sales by shipping state · all history">
+          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+            Total sales revenue grouped by the shipping state, across your full sales history (not just the {M.salesWindowDays}-day window).
+            Use this to gauge potential sales-tax exposure per state. "Unspecified" = sales with no shipping state recorded.
+          </div>
+          {!M.hasShippingState && (
+            <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+              No shipping-state column detected — everything is grouped under "Unspecified". Map a "Shipping state" column on your sales export to break this down.
+            </div>
+          )}
+          <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.taxableRevenue)} total sales</div>
+          <ResponsiveContainer width="100%" height={barH(M.salesByState.length, 30, 160)}>
+            <BarChart data={M.salesByState} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+              <CartesianGrid stroke={C.line} horizontal={false} />
+              <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+              <YAxis type="category" dataKey="state" width={yAxisW(M.salesByState, "state", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+              <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+              <Bar dataKey="revenue" name="Revenue" fill={C.gold} radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+          <div className="mt-3">
+            <ItemTable rows={M.salesByState} cols={[
+              ["state","Shipping state"],["units","Units"],["revenue","Total sales",fmtMoney],
+            ]} />
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
