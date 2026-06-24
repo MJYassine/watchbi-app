@@ -341,6 +341,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         invType,
         invTypeLabel: invType || "Unspecified",
         paymentStatus: normalizePayment(r[m.paymentStatus]),
+        supplier: (r[m.supplier] && String(r[m.supplier]).trim()) || null,
       };
     });
     // collect all statuses before filtering so the filter UI can show all options
@@ -441,6 +442,15 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
 
     out.hasPaymentStatus = items.some((x) => x.paymentStatus && x.paymentStatus !== "Unspecified");
     out.hasInvType = items.some((x) => x.invType);
+
+    // supplier ("purchased from") spend, from inventory purchase cost
+    out._invSupplierAgg = {};
+    filteredItems.forEach((x) => {
+      if (!x.supplier) return;
+      const k = x.supplier;
+      out._invSupplierAgg[k] = out._invSupplierAgg[k] || { supplier: k, units: 0, spend: 0, profit: null };
+      out._invSupplierAgg[k].units++; out._invSupplierAgg[k].spend += x.cost;
+    });
 
     const withTarget = filteredItems.filter((x) => x.targetWholesale && x.targetWholesale > 0);
     out.projItems = withTarget.length;
@@ -625,29 +635,22 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         tax,
       };
     });
-    // top 5 real states by tax owed (drop "Unspecified" — can't tax an unknown state)
+    // only the states that have a tax rule (top 4 by tax owed)
     out.salesTaxByState = taxed
-      .filter((s) => s.state !== "Unspecified")
+      .filter((s) => STATE_TAX_RULES[s.state])
       .sort((a, b) => b.tax - a.tax || b.revenue - a.revenue)
-      .slice(0, 5);
+      .slice(0, 4);
     out.salesTaxTotal = taxed.reduce((s, x) => s + x.tax, 0);
     out.hasShippingState = allSalesRows.some((x) => x.shippingState && x.shippingState !== "Unspecified");
 
-    // ── top suppliers by spend (cost) and by profit ──
-    if (rows.some((x) => x.supplier)) {
-      const bsup = {};
-      rows.forEach((x) => {
-        if (!x.supplier) return;
-        bsup[x.supplier] = bsup[x.supplier] || { supplier: x.supplier, units: 0, spend: 0, profit: 0 };
-        bsup[x.supplier].units++; bsup[x.supplier].spend += x.cost; bsup[x.supplier].profit += x.profit;
-      });
-      const sup = Object.values(bsup);
-      out.suppliersBySpend = [...sup].sort((a, b) => b.spend - a.spend).slice(0, 10);
-      out.suppliersByProfit = [...sup].sort((a, b) => b.profit - a.profit).slice(0, 10);
-      out.hasSupplier = true;
-    } else {
-      out.suppliersBySpend = []; out.suppliersByProfit = []; out.hasSupplier = false;
-    }
+    // supplier ("purchased from") spend + profit, from sales rows
+    out._salSupplierAgg = {};
+    rows.forEach((x) => {
+      if (!x.supplier) return;
+      const k = x.supplier;
+      out._salSupplierAgg[k] = out._salSupplierAgg[k] || { supplier: k, units: 0, spend: 0, profit: 0 };
+      out._salSupplierAgg[k].units++; out._salSupplierAgg[k].spend += x.cost; out._salSupplierAgg[k].profit += x.profit;
+    });
 
     // brand-level (only if brand present on sales)
     out.salesHasBrand = rows.some((x) => x.brand);
@@ -764,6 +767,20 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         .sort((a, b) => (healthRank[a.health] - healthRank[b.health]) || (b.buyScore - a.buyScore));
     }
   }
+
+  // ── top suppliers ("purchased from") — spend from inventory, profit from sales ──
+  const invSup = out._invSupplierAgg || {};
+  const salSup = out._salSupplierAgg || {};
+  // spend: prefer the inventory purchase record; fall back to sales cost
+  const spendAgg = Object.keys(invSup).length ? invSup : salSup;
+  out.suppliersBySpend = Object.values(spendAgg).sort((a, b) => b.spend - a.spend).slice(0, 10);
+  out.hasSupplierSpend = out.suppliersBySpend.length > 0;
+  // profit only available where sales carry the supplier column
+  out.suppliersByProfit = Object.values(salSup).sort((a, b) => (b.profit || 0) - (a.profit || 0)).slice(0, 10);
+  out.hasSupplierProfit = out.suppliersByProfit.length > 0;
+  out.hasSupplier = out.hasSupplierSpend || out.hasSupplierProfit;
+  delete out._invSupplierAgg; delete out._salSupplierAgg;
+
   return out;
 }
 
@@ -1457,6 +1474,7 @@ function InventoryTab({ M, filters }) {
     ["grading", "Grading & Aging"],
     ["quality", "Data Quality"],
     ["liabilities", "Liabilities"],
+    ["suppliers", "Suppliers"],
     ["projections", "Projections"],
   ];
 
@@ -1695,6 +1713,34 @@ function InventoryTab({ M, filters }) {
           Sales tax potential liability (by shipping state) lives under the <span style={{ color: C.gold }}>Sales → Tax</span> tab.
         </div>
       </>)}
+
+      {/* ════ SUPPLIERS ════ */}
+      {sub === "suppliers" && (
+        <Panel title="Top suppliers" note={M.hasSupplier ? "by spend & by profit" : "needs a 'purchased from' / supplier column"}>
+          {!M.hasSupplier
+            ? <Locked msg="Add a 'Supplier / vendor' (or 'Purchased from') column to your export to rank who you buy from." />
+            : (
+              <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+                <div>
+                  <SectionLabel>By spend (purchase cost)</SectionLabel>
+                  {M.hasSupplierSpend
+                    ? <ItemTable rows={M.suppliersBySpend} cols={[
+                        ["supplier","Supplier"],["units","Watches"],["spend","Spend",fmtMoney],
+                      ]} />
+                    : <Locked msg="No supplier spend data available." />}
+                </div>
+                <div>
+                  <SectionLabel>By profit</SectionLabel>
+                  {M.hasSupplierProfit
+                    ? <ItemTable rows={M.suppliersByProfit} cols={[
+                        ["supplier","Supplier"],["units","Watches"],["profit","Profit $",fmtMoney],
+                      ]} />
+                    : <Locked msg="Profit by supplier needs a supplier column on your sales export." />}
+                </div>
+              </div>
+            )}
+        </Panel>
+      )}
 
       {/* ════ PROJECTIONS ════ */}
       {sub === "projections" && (
@@ -1996,27 +2042,6 @@ function SalesTab({ M, filters }) {
         </div>
       </Panel>
 
-      {/* ── Top suppliers ── */}
-      <Panel title="Top suppliers" note={M.hasSupplier ? "by spend & by profit" : "needs a supplier column on sales"}>
-        {!M.hasSupplier
-          ? <Locked msg="Add a 'Supplier / vendor' column to your sales export to rank who you buy from by spend and profit." />
-          : (
-            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
-              <div>
-                <SectionLabel>By spend (cost of goods)</SectionLabel>
-                <ItemTable rows={M.suppliersBySpend} cols={[
-                  ["supplier","Supplier"],["units","Units"],["spend","Spend",fmtMoney],
-                ]} />
-              </div>
-              <div>
-                <SectionLabel>By profit</SectionLabel>
-                <ItemTable rows={M.suppliersByProfit} cols={[
-                  ["supplier","Supplier"],["units","Units"],["profit","Profit $",fmtMoney],
-                ]} />
-              </div>
-            </div>
-          )}
-      </Panel>
       </>)}
 
       {/* ════ TAX ════ */}
