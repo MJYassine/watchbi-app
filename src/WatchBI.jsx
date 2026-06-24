@@ -4,7 +4,7 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend,
 } from "recharts";
 import {
-  Upload, FileSpreadsheet, Boxes, TrendingUp, Sparkles, Send,
+  Upload, FileSpreadsheet, Boxes, TrendingUp, Sparkles,
   Check, X, AlertTriangle, Lock, Watch, Trash2, ArrowRight,
 } from "lucide-react";
 import * as XLSX from "xlsx";
@@ -61,7 +61,7 @@ const FIELDS = {
     ["condition", "Condition — New/Used (optional)"], ["status", "Status"],
     ["invType", "Inventory type — Owned/Consignment/Memo (optional)"],
     ["paymentStatus", "Payment status — Paid/Unpaid/Voided (optional)"],
-    ["serial", "Serial #"],
+    ["supplier", "Supplier / vendor (optional)"], ["serial", "Serial #"],
   ],
   sales: [
     ["saleDate", "Sale / invoice date"], ["purchaseDate", "Purchase date"],
@@ -69,7 +69,8 @@ const FIELDS = {
     ["profit", "Profit $ (optional)"], ["brand", "Brand (optional)"],
     ["modelName", "Model name (optional)"], ["modelNumber", "Model / reference # (optional)"],
     ["inventoryType", "Inventory type (optional)"], ["condition", "Condition — New/Used (optional)"],
-    ["shippingState", "Shipping state (optional)"], ["serial", "Serial # (optional)"],
+    ["shippingState", "Shipping state (optional)"], ["supplier", "Supplier / vendor (optional)"],
+    ["serial", "Serial # (optional)"],
   ],
 };
 
@@ -81,6 +82,7 @@ function guessField(role, header) {
   if (has("model name") || has("title item")) return "modelName";
   if (has("model number") || has("reference") || h === "ref") return "modelNumber";
   if (has("condition")) return "condition";
+  if (has("supplier") || has("vendor") || has("consignor") || has("bought from") || has("purchased from") || has("source")) return "supplier";
   if (has("payment") || has("paid")) return role === "inventory" ? "paymentStatus" : null;
   if (role === "sales") {
     if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
@@ -165,6 +167,23 @@ function normalizePayment(v) {
 }
 const isMemoType = (t) => /memo/i.test(String(t || ""));
 const isConsignmentType = (t) => /consign/i.test(String(t || ""));
+
+/* these reference numbers are excluded from velocity / median-days-to-sell
+   calculations (kept in unit counts / weekly average), per dealer request */
+const VELOCITY_IGNORE_REFS = ["210.90.42.20.01.001", "310.30.42.50.01.002"];
+function isVelocityIgnored(...vals) {
+  const norm = vals.map((v) => String(v || "").replace(/\s+/g, ""));
+  return VELOCITY_IGNORE_REFS.some((ref) => norm.some((v) => v.includes(ref)));
+}
+
+/* illustrative ("phony") sales-tax rules: rate applies to state sales above the
+   threshold. Only these states have a rule; others collect no tax. */
+const STATE_TAX_RULES = {
+  "New York": { rate: 0.08, threshold: 500000 },
+  "Florida": { rate: 0.07, threshold: 100000 },
+  "California": { rate: 0.095, threshold: 500000 },
+  "Georgia": { rate: 0.07, threshold: 100000 },
+};
 
 /* price tier buckets for sale price breakdowns */
 const PRICE_TIERS = [
@@ -351,7 +370,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       bbc[k].count++; bbc[k].cost += x.cost;
     });
     out.invByBrandCondition = Object.values(bbc)
-      .sort((a, b) => a.brand === b.brand ? a.condition.localeCompare(b.condition) : b.cost - a.cost);
+      .sort((a, b) => a.brand.localeCompare(b.brand) || a.condition.localeCompare(b.condition));
     out.invHasCondition = filteredItems.some((x) => x.condition && x.condition !== "Unspecified");
 
     const byLine = {};
@@ -478,10 +497,14 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       const sdt = toDate(r[m.saleDate]);
       let days = daysBetween(pd, sdt);
       if (days != null && (days < 0 || days > 2000)) days = null; // typo guard
-      const presold = days != null && days >= 0 && days <= 5;
+      // some reference numbers are excluded from velocity/median math: drop their
+      // days-to-sell so they never feed median/velocity, but keep the unit counted
+      const velIgnored = isVelocityIgnored(r[m.modelNumber], r[m.modelName]);
+      if (velIgnored) days = null;
+      const presold = days != null && days >= 0 && days <= 2;
       const brandNorm = normalizeBrand(r[m.brand]);
       return {
-        saleDate: sdt, days, presold, cost: cost || 0, price: price || 0,
+        saleDate: sdt, days, presold, velIgnored, cost: cost || 0, price: price || 0,
         profit: profit || 0,
         marginPct: cost ? (profit / cost) * 100 : null,
         brand: r[m.brand] || null, brandNorm,
@@ -491,6 +514,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         condition: normalizeCondition(r[m.condition]),
         priceTier: priceTierLabel(price),
         shippingState: (r[m.shippingState] && String(r[m.shippingState]).trim()) || "Unspecified",
+        supplier: (r[m.supplier] && String(r[m.supplier]).trim()) || null,
       };
     });
     // keep the full mapped set (pre-window, pre-presold) for tax/state liability,
@@ -519,7 +543,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       out.usingDefaultWindow = false;
     }
 
-    // "presold" = sold within 0-5 days of purchase — likely flipped before it ever
+    // "presold" = sold within 0-2 days of purchase — likely flipped before it ever
     // hit the floor, so it's excluded from sell-through analysis by default.
     out.presoldCount = rows.filter((x) => x.presold).length;
     if (!includePresold) {
@@ -581,18 +605,49 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         medianMargin: median(b._m),
       }));
 
-    // ── sales tax potential liability: total sales per shipping state (all history) ──
+    // ── sales tax by shipping state (all history) ──
     const bst = {};
     allSalesRows.forEach((x) => {
       const st = x.shippingState || "Unspecified";
       bst[st] = bst[st] || { state: st, units: 0, revenue: 0 };
       bst[st].units++; bst[st].revenue += x.price;
     });
-    // sort by revenue desc but always push "Unspecified" to the bottom
-    out.salesByState = Object.values(bst).sort((a, b) =>
-      a.state === "Unspecified" ? 1 : b.state === "Unspecified" ? -1 : b.revenue - a.revenue);
+    // apply the illustrative per-state tax rules (tax on revenue above threshold)
+    const taxed = Object.values(bst).map((s) => {
+      const rule = STATE_TAX_RULES[s.state];
+      const taxable = rule ? Math.max(0, s.revenue - rule.threshold) : 0;
+      const tax = rule ? taxable * rule.rate : 0;
+      return {
+        ...s,
+        taxRate: rule ? rule.rate : null,
+        taxThreshold: rule ? rule.threshold : null,
+        taxableBase: taxable,
+        tax,
+      };
+    });
+    // top 5 real states by tax owed (drop "Unspecified" — can't tax an unknown state)
+    out.salesTaxByState = taxed
+      .filter((s) => s.state !== "Unspecified")
+      .sort((a, b) => b.tax - a.tax || b.revenue - a.revenue)
+      .slice(0, 5);
+    out.salesTaxTotal = taxed.reduce((s, x) => s + x.tax, 0);
     out.hasShippingState = allSalesRows.some((x) => x.shippingState && x.shippingState !== "Unspecified");
-    out.taxableRevenue = out.salesByState.reduce((s, x) => s + x.revenue, 0);
+
+    // ── top suppliers by spend (cost) and by profit ──
+    if (rows.some((x) => x.supplier)) {
+      const bsup = {};
+      rows.forEach((x) => {
+        if (!x.supplier) return;
+        bsup[x.supplier] = bsup[x.supplier] || { supplier: x.supplier, units: 0, spend: 0, profit: 0 };
+        bsup[x.supplier].units++; bsup[x.supplier].spend += x.cost; bsup[x.supplier].profit += x.profit;
+      });
+      const sup = Object.values(bsup);
+      out.suppliersBySpend = [...sup].sort((a, b) => b.spend - a.spend).slice(0, 10);
+      out.suppliersByProfit = [...sup].sort((a, b) => b.profit - a.profit).slice(0, 10);
+      out.hasSupplier = true;
+    } else {
+      out.suppliersBySpend = []; out.suppliersByProfit = []; out.hasSupplier = false;
+    }
 
     // brand-level (only if brand present on sales)
     out.salesHasBrand = rows.some((x) => x.brand);
@@ -625,7 +680,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         key: b.key, brand: b.brand, condition: b.condition, units: b.units, profit: b.profit, revenue: b.revenue,
         profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
         medianMargin: median(b._m),
-      })).sort((a, b) => (a.brand === b.brand ? a.condition.localeCompare(b.condition) : b.profit - a.profit));
+      })).sort((a, b) => a.brand.localeCompare(b.brand) || a.condition.localeCompare(b.condition));
       out.hasCondition = rows.some((x) => x.condition && x.condition !== "Unspecified");
 
       // by product line
@@ -689,6 +744,9 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       const top = (arr, n, sortFn) => [...arr].sort(sortFn).slice(0, n);
       out.fastestModels = top(models.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
       out.fastestLines = top(out.salesByLine.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
+      // full (un-sliced) fastest lists so the UI can refill after an ignore
+      out.fastestModelsAll = [...models].filter((x) => x.medianDays != null).sort((a, b) => a.medianDays - b.medianDays);
+      out.fastestLinesAll = [...out.salesByLine].filter((x) => x.medianDays != null).sort((a, b) => a.medianDays - b.medianDays);
       out.bestProfitModels = top(modelsForBuy, 10, (a, b) => b.profit - a.profit);
       out.bestProfitLines = top(out.salesByLine, 10, (a, b) => b.profit - a.profit);
       out.bestScoreModels = top(modelsForBuy, 10, (a, b) => b.buyScore - a.buyScore);
@@ -707,90 +765,6 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     }
   }
   return out;
-}
-
-/* Compact summary handed to the chatbot — computed aggregates only. */
-function metricsForChat(M) {
-  const o = {
-    inventory_loaded: M.hasInv, sales_loaded: M.hasSales,
-    sales_has_brand_or_model: !!M.salesHasBrand,
-  };
-  if (M.hasInv) {
-    o.inventory = {
-      items: M.invCount, total_cost: Math.round(M.invCost),
-      brands: M.invBrandCount,
-      by_brand: M.invByBrand.slice(0, 20).map((b) => ({ brand: b.brand, count: b.count, cost: Math.round(b.cost) })),
-      by_line: M.invByLine.map((b) => ({ brand: b.brand, line: b.line, count: b.count })),
-      aging: M.aging.map((b) => ({ bucket: b.label, items: b.count, cost: Math.round(b.cost) })),
-      aged_capital_91plus: Math.round(M.agedValue),
-      projected_profit_items: M.projItems,
-      projected_profit_total: Math.round(M.projProfit),
-      projected_profit_note: "only computed on items that have a target wholesale price",
-      by_grade: M.invByGrade.map((b) => ({ grade: b.grade, items: b.count, cost: Math.round(b.cost) })),
-      grade_note: "Inventory quality grade. A = 0-30 days in stock, B = 31-60, C = 61-90, D = 91-180, F = 180+",
-      top_to_sell: (M.needToSell || []).map((b) => ({
-        brand: b.brand, model: b.modelName, ref: b.modelNumber,
-        grade: b.grade, days_in_stock: b.age, cost: Math.round(b.cost),
-      })),
-      data_quality: (M.dataQuality || []).map((d) => ({ field: d.field, missing: d.missing, present: d.present })),
-      unpaid_liability: Math.round(M.unpaidLiability || 0),
-      unpaid_count: M.unpaidCount || 0,
-      unpaid_note: "cost of unpaid watches, excluding memo and voided items",
-      consignment_liability: Math.round(M.consignmentLiability || 0),
-      consignment_count: M.consignmentCount || 0,
-      consignment_note: "cost of unsold consignment inventory",
-    };
-  }
-  if (M.hasSales) {
-    o.sales = {
-      units_sold: M.salesUnits, total_profit: Math.round(M.salesProfit),
-      revenue: Math.round(M.salesRevenue),
-      median_margin_pct: M.medianMargin && +M.medianMargin.toFixed(1),
-      median_days_to_sell: M.medianDays, mean_days_to_sell: M.meanDays && Math.round(M.meanDays),
-      window_note: M.usingDefaultWindow
-        ? `figures reflect the trailing ${M.salesWindowDays} days of sales history (through ${M.salesDateMax ? M.salesDateMax.toISOString().slice(0, 10) : "--"})`
-        : "figures reflect the user-selected date range",
-      by_inventory_type: M.salesByType,
-      by_price_tier: M.salesByPriceTier.map((b) => ({
-        tier: b.tier, units: b.units, profit: Math.round(b.profit), avg_profit: b.avgProfit != null ? Math.round(b.avgProfit) : null,
-      })),
-      by_brand_condition: (M.salesByBrandCondition || []).map((b) => ({
-        brand: b.brand, condition: b.condition, units: b.units, profit: Math.round(b.profit), margin_pct: b.profitPct != null ? +b.profitPct.toFixed(1) : null,
-      })),
-      sales_tax_by_state: (M.salesByState || []).map((b) => ({
-        state: b.state, units: b.units, revenue: Math.round(b.revenue),
-      })),
-      sales_tax_note: "total sales revenue per shipping state (all history); 'Unspecified' = no state recorded",
-      monthly: M.monthly,
-    };
-    if (M.salesHasBrand) {
-      o.sales.by_brand = M.salesByBrand.map((b) => ({
-        brand: b.brand, units: b.units, profit: Math.round(b.profit),
-        median_days: b.medianDays, median_margin_pct: b.medianMargin && +b.medianMargin.toFixed(1),
-      }));
-      o.sales.top_models_by_frequency = M.salesByModel.slice(0, 15).map((b) => ({
-        brand: b.brand, model: b.model, units: b.units,
-        avg_profit: Math.round(b.avgProfit), median_days: b.medianDays, current_stock: b.stock,
-      }));
-      o.sales.ranked_buy_list = M.ranking.slice(0, 15).map((b) => ({
-        brand: b.brand, model: b.model, buy_score: b.buyScore,
-        units_sold: b.units, avg_profit: Math.round(b.avgProfit),
-        median_days: b.medianDays, current_stock: b.stock,
-        weekly_velocity: b.weeklyVelocity, weeks_of_stock: b.weeksOfStock, stock_health: b.health,
-      }));
-      o.sales.fastest_models = M.fastestModels.map((b) => ({ brand: b.brand, model: b.model, median_days: b.medianDays }));
-      o.sales.fastest_lines = M.fastestLines.map((b) => ({ brand: b.brand, line: b.line, median_days: b.medianDays }));
-      o.sales.best_profit_models = M.bestProfitModels.map((b) => ({ brand: b.brand, model: b.model, profit: Math.round(b.profit) }));
-      o.sales.best_profit_lines = M.bestProfitLines.map((b) => ({ brand: b.brand, line: b.line, profit: Math.round(b.profit) }));
-      o.sales.stock_health_urgent = M.healthByVelocityModels.filter((b) => b.health !== "green").slice(0, 15).map((b) => ({
-        brand: b.brand, model: b.model, health: b.health, weeks_of_stock: b.weeksOfStock,
-        current_stock: b.stock, weekly_velocity: b.weeklyVelocity,
-      }));
-    } else {
-      o.sales.brand_model_breakdowns = "UNAVAILABLE — the sales data has no brand or model/reference column, so velocity/profit/frequency by brand, line, or model cannot be computed yet. Tell the user this plainly when relevant.";
-    }
-  }
-  return o;
 }
 
 /* =========================================================================
@@ -937,7 +911,7 @@ function StockFilter({ value, onChange }) {
   );
 }
 
-/* presold (0-5 day) sales toggle */
+/* presold (0-2 day) sales toggle */
 function PresoldFilter({ value, onChange, count }) {
   const opts = [[false, "Exclude presold (default)"], [true, "Include presold"]];
   return (
@@ -955,7 +929,7 @@ function PresoldFilter({ value, onChange, count }) {
           }} className="px-3 py-1">{lbl}</button>
       ))}
       <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
-        Sales completed within 0–5 days of purchase ({count ?? 0}) are considered "presold" and {value ? "are included in" : "are not part of"} this analysis.
+        Sales completed within 0–2 days of purchase ({count ?? 0}) are considered "presold" and {value ? "are included in" : "are not part of"} this analysis.
       </span>
     </div>
   );
@@ -1347,8 +1321,8 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
     (includeOlderSales ? 1 : 0) + (statusFilterActive ? 1 : 0);
 
   return (
-    <div className="flex flex-col lg:flex-row" style={{ minHeight: 520 }}>
-      <div className="flex-1 p-6">
+    <div style={{ minHeight: 520 }}>
+      <div className="p-6">
         <div className="flex gap-1 mb-5">
           {tabs.map(([k, label, Icon]) => (
             <button key={k} onClick={() => setTab(k)}
@@ -1402,7 +1376,6 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
         {tab === "sales" && <SalesTab M={M} filters={filters} />}
         {tab === "buy" && <BuyTab M={M} filters={filters} includePresold={includePresold} />}
       </div>
-      <ChatPanel M={M} />
     </div>
   );
 }
@@ -2022,33 +1995,60 @@ function SalesTab({ M, filters }) {
           ]} />
         </div>
       </Panel>
+
+      {/* ── Top suppliers ── */}
+      <Panel title="Top suppliers" note={M.hasSupplier ? "by spend & by profit" : "needs a supplier column on sales"}>
+        {!M.hasSupplier
+          ? <Locked msg="Add a 'Supplier / vendor' column to your sales export to rank who you buy from by spend and profit." />
+          : (
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+              <div>
+                <SectionLabel>By spend (cost of goods)</SectionLabel>
+                <ItemTable rows={M.suppliersBySpend} cols={[
+                  ["supplier","Supplier"],["units","Units"],["spend","Spend",fmtMoney],
+                ]} />
+              </div>
+              <div>
+                <SectionLabel>By profit</SectionLabel>
+                <ItemTable rows={M.suppliersByProfit} cols={[
+                  ["supplier","Supplier"],["units","Units"],["profit","Profit $",fmtMoney],
+                ]} />
+              </div>
+            </div>
+          )}
+      </Panel>
       </>)}
 
       {/* ════ TAX ════ */}
       {sub === "tax" && (
-        <Panel title="Sales tax potential liability" note="total sales by shipping state · all history">
+        <Panel title="Sales tax by state" note="top 5 states · all history">
           <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-            Total sales revenue grouped by the shipping state, across your full sales history (not just the {M.salesWindowDays}-day window).
-            Use this to gauge potential sales-tax exposure per state. "Unspecified" = sales with no shipping state recorded.
+            Estimated sales tax owed per shipping state, across your full sales history. Tax applies to state sales
+            above each state's threshold: New York 8% over $500k · California 9.5% over $500k · Florida 7% over $100k · Georgia 7% over $100k.
+            States without a rule collect no tax. Showing the top 5 states by tax owed.
           </div>
           {!M.hasShippingState && (
             <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-              No shipping-state column detected — everything is grouped under "Unspecified". Map a "Shipping state" column on your sales export to break this down.
+              No shipping-state column detected. Map a "Shipping state" column on your sales export to break this down.
             </div>
           )}
-          <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.taxableRevenue)} total sales</div>
-          <ResponsiveContainer width="100%" height={barH(M.salesByState.length, 30, 160)}>
-            <BarChart data={M.salesByState} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+          <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.salesTaxTotal)} estimated tax owed</div>
+          <ResponsiveContainer width="100%" height={barH(M.salesTaxByState.length, 34, 140)}>
+            <BarChart data={M.salesTaxByState} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
               <CartesianGrid stroke={C.line} horizontal={false} />
               <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
-              <YAxis type="category" dataKey="state" width={yAxisW(M.salesByState, "state", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+              <YAxis type="category" dataKey="state" width={yAxisW(M.salesTaxByState, "state", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
               <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
-              <Bar dataKey="revenue" name="Revenue" fill={C.gold} radius={[0, 4, 4, 0]} />
+              <Bar dataKey="tax" name="Tax owed" fill={C.gold} radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
           <div className="mt-3">
-            <ItemTable rows={M.salesByState} cols={[
-              ["state","Shipping state"],["units","Units"],["revenue","Total sales",fmtMoney],
+            <ItemTable rows={M.salesTaxByState} cols={[
+              ["state","State"],
+              ["taxRate","Rate",(v) => v == null ? "—" : (v * 100).toFixed(1) + "%"],
+              ["revenue","Total sales",fmtMoney],
+              ["taxableBase","Taxable base",fmtMoney],
+              ["tax","Tax owed",fmtMoney],
             ]} />
           </div>
         </Panel>
@@ -2074,7 +2074,7 @@ function QuestionCard({ num, question, children }) {
 }
 
 /* generic ranked table for model/line rows */
-function RankTable({ rows, nameKey, showScore, models }) {
+function RankTable({ rows, nameKey, showScore, models, onIgnore }) {
   const [expanded, setExpanded] = useState(null);
   const cols = [
     ["brand","Brand"],
@@ -2088,6 +2088,11 @@ function RankTable({ rows, nameKey, showScore, models }) {
   ];
   if (showScore) cols.push(["buyScore","Score",(v) => v?.toFixed(3)]);
   cols.push(["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />]);
+  if (onIgnore) cols.push(["__ignore","",(_, r) => (
+    <button onClick={(e) => { e.stopPropagation(); onIgnore(r); }}
+      style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: C.dim, whiteSpace: "nowrap" }}
+      className="px-3 py-1">Ignore</button>
+  )]);
 
   if (nameKey === "line" && models) {
     const subCols = [
@@ -2181,7 +2186,15 @@ function BuyTab({ M, filters, includePresold }) {
     setExcludedKeys((prev) => { const next = new Set(prev); next.delete(keyOf(x)); return next; });
   }
 
-  const fastest = { model: applyFilters(M.fastestModels, filters), line: applyFilters(M.fastestLines, filters) };
+  // fastest-10 with ignore/refill (uses the full ranked list so a removed watch is replaced)
+  const fastestAll = { model: applyFilters(M.fastestModelsAll, filters), line: applyFilters(M.fastestLinesAll, filters) };
+  const fastKeyOf = (r) => (r.brand || "") + "|" + (r.model ?? r.line);
+  const [excludedFast, setExcludedFast] = useState(() => new Set());
+  const fastListKey = fastestAll[g1].map(fastKeyOf).join(",");
+  useEffect(() => { setExcludedFast(new Set()); }, [fastListKey]);
+  const fastVisible = fastestAll[g1].filter((r) => !excludedFast.has(fastKeyOf(r))).slice(0, 10);
+  const fastExcludedItems = fastestAll[g1].filter((r) => excludedFast.has(fastKeyOf(r)));
+
   const bestProfit = { model: applyFilters(M.bestProfitModels, filters), line: applyFilters(M.bestProfitLines, filters) };
   const bestScore = { model: applyFilters(M.bestScoreModels, filters), line: applyFilters(M.bestScoreLines, filters) };
   const healthVel = { model: applyFilters(M.healthByVelocityModels, filters), line: applyFilters(M.healthByVelocityLines, filters) };
@@ -2256,8 +2269,8 @@ function BuyTab({ M, filters, includePresold }) {
           Scored by: velocity (35%) + avg profit (35%) + sales volume (30%). Out-of-stock items get a boost.
           Stock health = current stock ÷ weekly sell rate (red &lt; 1 week, yellow &lt; 2 weeks).
           {" "}{includePresold
-            ? "Presold sales (0–5 days) are included in this ranking."
-            : "Presold sales (0–5 days) are excluded from this ranking — toggle \"Include presold\" in the filter bar to factor them in."}
+            ? "Presold sales (0–2 days) are included in this ranking."
+            : "Presold sales (0–2 days) are excluded from this ranking — toggle \"Include presold\" in the filter bar to factor them in."}
         </div>
         <RankTable rows={ranking.slice(0, 20)} nameKey="model" showScore />
       </QuestionCard>
@@ -2265,9 +2278,26 @@ function BuyTab({ M, filters, includePresold }) {
       {/* Fastest 10 */}
       <QuestionCard num="3" question="Fastest 10 watches to sell">
         <GranularityToggle value={g1} onChange={setG1} />
-        {fastest[g1].length === 0
+        <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+          Fastest sellers by median days to sell. Click "Ignore" to drop one — the next-fastest takes its place.
+        </div>
+        {fastVisible.length === 0
           ? <Locked msg="No median-days data available for this view." />
-          : <RankTable rows={fastest[g1]} nameKey={g1} models={allModels} />}
+          : <RankTable rows={fastVisible} nameKey={g1} models={allModels}
+              onIgnore={(r) => setExcludedFast((prev) => new Set(prev).add(fastKeyOf(r)))} />}
+        {fastExcludedItems.length > 0 && (
+          <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }} className="mt-3">
+            <div className="mb-1">Ignored:</div>
+            <div className="flex flex-wrap gap-2">
+              {fastExcludedItems.map((r) => (
+                <button key={fastKeyOf(r)}
+                  onClick={() => setExcludedFast((prev) => { const n = new Set(prev); n.delete(fastKeyOf(r)); return n; })}
+                  style={{ fontFamily: SANS, fontSize: 12, borderRadius: 999, border: `1px solid ${C.line}`, background: "transparent", color: C.dim }}
+                  className="px-3 py-1">{r.brand} — {r.model ?? r.line} ✕</button>
+              ))}
+            </div>
+          </div>
+        )}
       </QuestionCard>
 
       {/* Best 10 by profit */}
@@ -2382,95 +2412,6 @@ function ItemTable({ rows, cols, onRowClick, getRowKey, expandedKey, renderExpan
           })}
         </tbody>
       </table>
-    </div>
-  );
-}
-
-/* ---------- chatbot ---------- */
-function ChatPanel({ M }) {
-  const [msgs, setMsgs] = useState([
-    { role: "assistant", text: "Ask me about your inventory and sales. Try: \"What should I buy?\" or \"Rank by velocity and profit.\"" },
-  ]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const scrollRef = useRef();
-  useEffect(() => { scrollRef.current?.scrollTo(0, 1e9); }, [msgs, busy]);
-
-  async function send() {
-    const q = input.trim();
-    if (!q || busy) return;
-    const history = [...msgs, { role: "user", text: q }];
-    setMsgs(history); setInput(""); setBusy(true);
-    const summary = JSON.stringify(metricsForChat(M));
-    const instructions =
-      "You are a sharp analyst for a luxury watch dealership. Answer ONLY from the METRICS JSON below. " +
-      "Use concrete numbers. Be concise and direct, no filler. If a question needs data marked UNAVAILABLE, " +
-      "say so plainly and name the missing field instead of guessing. Never invent figures not in the JSON.";
-    // Prior turns as plain text (skip the seeded greeting at index 0) so the
-    // request is always a single, valid user message.
-    const transcript = msgs
-      .filter((_, i) => i !== 0)
-      .map((m) => (m.role === "user" ? "Q: " : "A: ") + m.text)
-      .join("\n");
-    const userContent =
-      instructions +
-      "\n\nMETRICS JSON:\n" + summary +
-      (transcript ? "\n\nEarlier in this chat:\n" + transcript : "") +
-      "\n\nQuestion: " + q;
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userContent }),
-      });
-      const data = await res.json();
-      const text = data.text || "";
-      setMsgs((m) => [...m, { role: "assistant", text: text || "No response from the model." }]);
-    } catch (e) {
-      setMsgs((m) => [...m, { role: "assistant", text: "Couldn't reach the model just now. The dashboard numbers are still live." }]);
-    } finally { setBusy(false); }
-  }
-
-  return (
-    <div style={{
-      background: C.panel, borderLeft: `1px solid ${C.line}`,
-      width: 380, minWidth: 300, flexShrink: 0,
-    }} className="flex flex-col">
-      <div style={{ borderBottom: `1px solid ${C.line}` }} className="px-4 py-3 flex items-center gap-2">
-        <Sparkles size={16} style={{ color: C.gold }} />
-        <span style={{ fontFamily: SERIF }} className="text-base">Ask the data</span>
-      </div>
-      <div ref={scrollRef} className="flex-1 overflow-auto p-4 flex flex-col gap-3"
-        style={{ minHeight: 320, maxHeight: "calc(100vh - 180px)" }}>
-        {msgs.map((m, i) => (
-          <div key={i} style={{
-            alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-            background: m.role === "user" ? C.gold : C.panel2,
-            color: m.role === "user" ? C.bg : C.text,
-            borderRadius: 12, fontFamily: SANS, whiteSpace: "pre-wrap", maxWidth: "92%",
-            lineHeight: 1.55,
-          }} className="px-3 py-2 text-sm">{m.text}</div>
-        ))}
-        {busy && (
-          <div style={{ color: C.faint, fontFamily: SANS, fontStyle: "italic" }} className="text-sm">
-            thinking…
-          </div>
-        )}
-      </div>
-      <div style={{ borderTop: `1px solid ${C.line}` }} className="p-3 flex gap-2">
-        <input value={input} onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="Ask about velocity, profit, what to buy…"
-          style={{ background: C.panel2, color: C.text, border: `1px solid ${C.line}`, borderRadius: 10, fontFamily: SANS }}
-          className="flex-1 text-sm px-3 py-2 outline-none" />
-        <button onClick={send} disabled={busy}
-          style={{
-            background: busy ? C.line : C.gold,
-            color: busy ? C.faint : C.bg,
-            borderRadius: 10, transition: "background .2s",
-          }} className="px-3 py-2">
-          <Send size={16} />
-        </button>
-      </div>
     </div>
   );
 }
