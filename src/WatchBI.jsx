@@ -70,7 +70,7 @@ const FIELDS = {
     ["modelName", "Model name (optional)"], ["modelNumber", "Model / reference # (optional)"],
     ["inventoryType", "Inventory type (optional)"], ["condition", "Condition — New/Used (optional)"],
     ["shippingState", "Shipping state (optional)"], ["supplier", "Supplier / vendor (optional)"],
-    ["serial", "Serial # (optional)"],
+    ["salesperson", "Salesperson — created by (optional)"], ["serial", "Serial # (optional)"],
   ],
 };
 
@@ -85,6 +85,7 @@ function guessField(role, header) {
   if (has("supplier") || has("vendor") || has("consignor") || has("bought from") || has("purchased from") || has("source")) return "supplier";
   if (has("payment") || has("paid")) return role === "inventory" ? "paymentStatus" : null;
   if (role === "sales") {
+    if (has("created by") || has("salesperson") || has("sales person") || has("sold by") || has("sales rep")) return "salesperson";
     if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
     if (has("invoice price") || has("sale price") || has("sold price")) return "salePrice";
     if (h === "profit") return "profit";
@@ -525,6 +526,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         priceTier: priceTierLabel(price),
         shippingState: (r[m.shippingState] && String(r[m.shippingState]).trim()) || "Unspecified",
         supplier: (r[m.supplier] && String(r[m.supplier]).trim()) || null,
+        salesperson: (r[m.salesperson] && String(r[m.salesperson]).trim()) || null,
       };
     });
     // keep the full mapped set (pre-window, pre-presold) for tax/state liability,
@@ -590,6 +592,24 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       mo[k].units++; mo[k].profit += x.profit;
     });
     out.monthly = Object.values(mo).sort((a, b) => a.month.localeCompare(b.month));
+
+    // by salesperson ("created by") — profit, sales, velocity (median days to sell)
+    const bperson = {};
+    rows.forEach((x) => {
+      if (!x.salesperson) return;
+      const k = x.salesperson;
+      bperson[k] = bperson[k] || { salesperson: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
+      bperson[k].units++; bperson[k].profit += x.profit; bperson[k].revenue += x.price; bperson[k].cost += x.cost;
+      if (x.days != null) bperson[k]._days.push(x.days);
+      if (x.marginPct != null) bperson[k]._m.push(x.marginPct);
+    });
+    out.salesByPerson = Object.values(bperson).map((b) => ({
+      salesperson: b.salesperson, units: b.units, profit: b.profit, revenue: b.revenue,
+      avgProfit: b.units ? b.profit / b.units : null,
+      profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+      medianDays: median(b._days), medianMargin: median(b._m),
+    })).sort((a, b) => b.profit - a.profit);
+    out.hasSalesperson = rows.some((x) => x.salesperson);
 
     // by type (always available)
     const bt = {};
@@ -1873,6 +1893,47 @@ function SalesTab({ M, filters }) {
               <ItemTable rows={fBrand} cols={[
                 ["brand","Brand"],["units","Units"],["profit","Profit $",fmtMoney],
                 ["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+              ]} />
+            </div>
+          </>)}
+      </Panel>
+
+      {/* ── By Salesperson ── */}
+      <Panel title="By salesperson" note={M.hasSalesperson ? "profit · sales · velocity" : "needs a 'created by' / salesperson column"}>
+        {!M.hasSalesperson
+          ? <Locked msg="Add a 'Created by' (salesperson) column to your sales export to rank who sold what." />
+          : (<>
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+              <div>
+                <SectionLabel>Profit $</SectionLabel>
+                <ResponsiveContainer width="100%" height={barH(M.salesByPerson.length, 36, 120)}>
+                  <BarChart data={[...M.salesByPerson].sort((a,b) => b.profit - a.profit)} layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                    <CartesianGrid stroke={C.line} horizontal={false} />
+                    <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                    <YAxis type="category" dataKey="salesperson" width={yAxisW(M.salesByPerson, "salesperson", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+                    <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+                    <Bar dataKey="profit" name="Profit" fill={C.green} radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div>
+                <SectionLabel>Sales $</SectionLabel>
+                <ResponsiveContainer width="100%" height={barH(M.salesByPerson.length, 36, 120)}>
+                  <BarChart data={[...M.salesByPerson].sort((a,b) => b.revenue - a.revenue)} layout="vertical" margin={{ left: 8, right: 24, top: 2, bottom: 2 }}>
+                    <CartesianGrid stroke={C.line} horizontal={false} />
+                    <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+                    <YAxis type="category" dataKey="salesperson" width={yAxisW(M.salesByPerson, "salesperson", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+                    <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+                    <Bar dataKey="revenue" name="Sales" fill={C.gold} radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <div className="mt-3">
+              <ItemTable rows={M.salesByPerson} cols={[
+                ["salesperson","Salesperson"],["units","Units"],
+                ["revenue","Sales $",fmtMoney],["profit","Profit $",fmtMoney],
+                ["profitPct","Margin %",fmtPct],["medianDays","Velocity (median days)"],
               ]} />
             </div>
           </>)}
