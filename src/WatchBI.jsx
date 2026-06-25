@@ -155,6 +155,14 @@ function normalizeCondition(v) {
   if (s.includes("used") || s.includes("pre-owned") || s.includes("preowned") || s.includes("pre owned") || s.includes("second")) return "Used";
   return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
 }
+/* canonical key identifying a watch model for the exclusion filter — prefers
+   the reference/model number, falls back to the model name */
+function modelKeyOf(modelNumber, modelName) {
+  const num = modelNumber != null ? String(modelNumber).trim() : "";
+  const name = modelName != null ? String(modelName).trim() : "";
+  return num || name || "";
+}
+
 /* rank conditions best -> worst so "New" sorts first, then down in quality */
 function conditionRank(c) {
   const s = String(c || "").toLowerCase();
@@ -316,16 +324,30 @@ const median = (arr) => {
 /* =========================================================================
    METRICS ENGINE
    ========================================================================= */
-function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, invStatusFilter) {
+function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, invStatusFilter, excludedModels) {
   const inv = datasets.find((d) => d.role === "inventory");
   const sal = datasets.find((d) => d.role === "sales");
   const today = new Date();
   const out = { hasInv: !!inv, hasSales: !!sal };
+  const hasExcl = excludedModels && excludedModels.size > 0;
+  // accumulates the distinct watch models present (for the exclusion autocomplete)
+  const modelOptionMap = {};
+  const addModelOption = (brand, modelNumber, modelName) => {
+    const key = modelKeyOf(modelNumber, modelName);
+    if (!key) return;
+    if (!modelOptionMap[key]) {
+      const num = modelNumber != null ? String(modelNumber).trim() : "";
+      const name = modelName != null ? String(modelName).trim() : "";
+      const label = [brand, num, name].filter(Boolean).join(" · ");
+      modelOptionMap[key] = { key, brand: brand || null, modelNumber: num || null, modelName: name || null, label, count: 0 };
+    }
+    modelOptionMap[key].count++;
+  };
 
   /* ----- inventory ----- */
   if (inv) {
     const m = inv.mapping;
-    const items = inv.rows.map((r, i) => {
+    let items = inv.rows.map((r, i) => {
       const cost = toNum(r[m.cost]);
       const tw = toNum(r[m.targetWholesale]);
       const tag = toNum(r[m.tagPrice]);
@@ -333,6 +355,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       const pd = toDate(r[m.purchaseDate]);
       const age = pd ? daysBetween(pd, today) : null;
       const invType = (r[m.invType] && String(r[m.invType]).trim()) || null;
+      addModelOption(r[m.brand], r[m.modelNumber], r[m.modelName]);
       return {
         _id: i,
         brand: r[m.brand] || "Unknown",
@@ -340,6 +363,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName],
         modelNumber: r[m.modelNumber] || null,
+        modelKey: modelKeyOf(r[m.modelNumber], r[m.modelName]),
         cost: cost || 0,
         costMissing: cost == null || cost === 0,
         purchaseDate: pd,
@@ -357,6 +381,8 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     });
     // collect all statuses before filtering so the filter UI can show all options
     out.invStatuses = [...new Set(items.map((x) => x.status).filter(Boolean))].sort();
+    // drop excluded models from every inventory total
+    if (hasExcl) items = items.filter((x) => !excludedModels.has(x.modelKey));
     const filteredItems = (invStatusFilter && invStatusFilter.size)
       ? items.filter((x) => invStatusFilter.has(x.status))
       : items;
@@ -524,6 +550,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       if (velIgnored) days = null;
       const presold = days != null && days >= 0 && days <= 2;
       const brandNorm = normalizeBrand(r[m.brand]);
+      addModelOption(r[m.brand], r[m.modelNumber], r[m.modelName]);
       return {
         saleDate: sdt, days, presold, velIgnored, cost: cost || 0, price: price || 0,
         profit: profit || 0,
@@ -531,6 +558,8 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         brand: r[m.brand] || null, brandNorm,
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName] || null,
+        modelNumber: r[m.modelNumber] || null,
+        modelKey: modelKeyOf(r[m.modelNumber], r[m.modelName]),
         type: r[m.inventoryType] || "Unspecified",
         condition: normalizeCondition(r[m.condition]),
         priceTier: priceTierLabel(price),
@@ -539,6 +568,8 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         salesperson: (r[m.salesperson] && String(r[m.salesperson]).trim()) || null,
       };
     });
+    // drop excluded models from every sales total
+    if (hasExcl) rows = rows.filter((x) => !excludedModels.has(x.modelKey));
     // keep the full mapped set (pre-window, pre-presold) for tax/state liability,
     // which is a cumulative financial view rather than a recent-performance view
     const allSalesRows = rows;
@@ -575,6 +606,8 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     out.salesUnits = rows.length;
     out.salesProfit = rows.reduce((s, x) => s + x.profit, 0);
     out.salesRevenue = rows.reduce((s, x) => s + x.price, 0);
+    out.salesCOGS = rows.reduce((s, x) => s + x.cost, 0);
+    out.salesProfitPct = out.salesCOGS ? (out.salesProfit / out.salesCOGS) * 100 : null;
     out.medianMargin = median(rows.map((x) => x.marginPct));
     out.medianDays = median(rows.map((x) => x.days));
     out.meanDays = (() => {
@@ -813,6 +846,9 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
   out.hasSupplier = out.hasSupplierSpend || out.hasSupplierProfit;
   delete out._invSupplierAgg; delete out._salSupplierAgg;
 
+  // distinct models present in the data, for the exclusion autocomplete
+  out.modelOptions = Object.values(modelOptionMap).sort((a, b) => a.label.localeCompare(b.label));
+
   return out;
 }
 
@@ -827,6 +863,49 @@ function Stat({ label, value, sub }) {
         className="text-xs uppercase">{label}</div>
       <div style={{ color: C.text, fontFamily: SERIF }} className="text-2xl">{value}</div>
       {sub && <div style={{ color: C.faint, fontFamily: SANS }} className="text-xs">{sub}</div>}
+    </div>
+  );
+}
+/* side-by-side "with vs without exclusions" comparison of key totals */
+function ExclusionSummary({ rows, excludedCount, scope }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.gold}`, borderRadius: 14 }} className="p-4">
+      <div className="flex items-baseline justify-between mb-3 flex-wrap gap-2">
+        <h3 style={{ color: C.gold, fontFamily: SERIF }} className="text-lg">
+          With vs without {excludedCount} excluded {excludedCount === 1 ? "model" : "models"}
+        </h3>
+        <span style={{ color: C.faint, fontFamily: SANS }} className="text-xs">
+          {scope === "dashboard" ? "exclusion applied dashboard-wide" : "exclusion applied to totals only"}
+        </span>
+      </div>
+      <div className="overflow-auto">
+        <table className="w-full" style={{ fontFamily: SANS, fontSize: 13 }}>
+          <thead>
+            <tr style={{ color: C.faint }}>
+              <th className="text-left py-2 pr-4 font-normal text-xs uppercase tracking-wide">Metric</th>
+              <th className="text-right py-2 pr-6 font-normal text-xs uppercase tracking-wide">Full</th>
+              <th className="text-right py-2 pr-6 font-normal text-xs uppercase tracking-wide">Adjusted</th>
+              <th className="text-right py-2 font-normal text-xs uppercase tracking-wide">Difference</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const diff = (r.full ?? 0) - (r.adj ?? 0);
+              const fmt = r.fmt || ((v) => v);
+              return (
+                <tr key={r.label} style={{ borderTop: `1px solid ${C.line}`, color: C.text }}>
+                  <td className="py-2 pr-4">{r.label}</td>
+                  <td className="py-2 pr-6 text-right">{fmt(r.full)}</td>
+                  <td className="py-2 pr-6 text-right" style={{ color: C.gold }}>{fmt(r.adj)}</td>
+                  <td className="py-2 text-right" style={{ color: Math.abs(diff) < 1e-9 ? C.faint : C.dim }}>
+                    {Math.abs(diff) < 1e-9 ? "—" : "−" + fmt(Math.abs(diff))}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -961,6 +1040,98 @@ function StockFilter({ value, onChange }) {
 }
 
 /* presold (0-2 day) sales toggle */
+/* searchable multi-select that excludes specific watch models from the totals */
+function ModelExclusionFilter({ options, excluded, onAdd, onRemove, onClear, scope, onScope }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? options.filter((o) =>
+        !excluded.has(o.key) &&
+        (o.label.toLowerCase().includes(q) ||
+         (o.modelNumber && o.modelNumber.toLowerCase().includes(q)) ||
+         (o.modelName && o.modelName.toLowerCase().includes(q)) ||
+         (o.brand && o.brand.toLowerCase().includes(q)))
+      ).slice(0, 12)
+    : [];
+  const byKey = {};
+  options.forEach((o) => { byKey[o.key] = o; });
+  const excludedList = Array.from(excluded).map((k) => byKey[k] || { key: k, label: k });
+  const scopeOpts = [["dashboard", "Dashboard-wide"], ["summary", "Summary totals only"]];
+
+  return (
+    <div className="flex flex-col gap-1.5 mb-1">
+      <div className="flex flex-wrap items-start gap-2">
+        <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50, marginTop: 6 }}>
+          Exclude
+        </span>
+        <div style={{ position: "relative", minWidth: 260 }}>
+          <input
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setTimeout(() => setOpen(false), 150)}
+            placeholder="Search a model # or name to exclude…"
+            style={{
+              fontFamily: SANS, fontSize: 12, color: C.text, background: C.bg,
+              border: `1px solid ${C.line}`, borderRadius: 8, padding: "5px 10px", width: 280,
+            }} />
+          {open && matches.length > 0 && (
+            <div style={{
+              position: "absolute", zIndex: 30, top: "calc(100% + 4px)", left: 0, width: 320,
+              background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8,
+              maxHeight: 240, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,.4)",
+            }}>
+              {matches.map((o) => (
+                <button key={o.key}
+                  onMouseDown={(e) => { e.preventDefault(); onAdd(o.key); setQuery(""); }}
+                  style={{
+                    display: "block", width: "100%", textAlign: "left", fontFamily: SANS, fontSize: 12,
+                    color: C.text, background: "transparent", border: "none", padding: "7px 10px", cursor: "pointer",
+                  }}
+                  className="hover:opacity-80">
+                  {o.label}{o.count ? <span style={{ color: C.faint }}> · {o.count}</span> : null}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {excludedList.length > 0 && (
+          <button onClick={onClear}
+            style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: C.dim, marginTop: 1 }}
+            className="px-3 py-1">Clear all</button>
+        )}
+      </div>
+      {excludedList.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2" style={{ marginLeft: 58 }}>
+          {excludedList.map((o) => (
+            <button key={o.key} onClick={() => onRemove(o.key)}
+              style={{ fontFamily: SANS, fontSize: 12, borderRadius: 999, border: `1px solid ${C.gold}`, background: "transparent", color: C.gold }}
+              className="px-3 py-1">{o.label} ✕</button>
+          ))}
+        </div>
+      )}
+      {excludedList.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2" style={{ marginLeft: 58 }}>
+          <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>Scope:</span>
+          {scopeOpts.map(([k, lbl]) => (
+            <button key={k} onClick={() => onScope(k)}
+              style={{
+                fontFamily: SANS, fontSize: 12, borderRadius: 999,
+                border: `1px solid ${scope === k ? C.gold : C.line}`,
+                background: scope === k ? C.gold : "transparent",
+                color: scope === k ? C.bg : C.dim,
+              }} className="px-3 py-1">{lbl}</button>
+          ))}
+          <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
+            {scope === "dashboard" ? "excluded from the whole dashboard" : "excluded from summary totals only — still shown in detail tables"}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PresoldFilter({ value, onChange, count }) {
   const opts = [[false, "Exclude presold (default)"], [true, "Include presold"]];
   return (
@@ -1116,7 +1287,17 @@ export default function WatchBI() {
   // starts null (all statuses included); Dashboard sets this to exclude
   // "On Hold / Reserved" after the first metrics render via useEffect.
   const [invStatusFilter, setInvStatusFilter] = useState(null);
-  const metrics = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter) : null), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter]);
+  // model exclusion filter: a set of model keys to drop, plus scope of effect
+  const [excludedModels, setExcludedModels] = useState(() => new Set());
+  const [exclScope, setExclScope] = useState("dashboard"); // "dashboard" | "summary"
+  const hasExcl = excludedModels.size > 0;
+
+  // full (no exclusions) metrics — always computed; drives the model picker + "with" view
+  const metricsFull = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter, null) : null), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter]);
+  // adjusted metrics — same but with excluded models removed
+  const metricsExcl = useMemo(() => (stage === "dash" && hasExcl ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter, excludedModels) : metricsFull), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter, excludedModels, hasExcl, metricsFull]);
+  // which one drives the dashboard body: dashboard-wide exclusion → adjusted; summary-only → full
+  const metrics = (hasExcl && exclScope === "dashboard") ? metricsExcl : metricsFull;
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
@@ -1141,7 +1322,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} includeOlderSales={includeOlderSales} setIncludeOlderSales={setIncludeOlderSales} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} MFull={metricsFull} MExcl={metricsExcl} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} includeOlderSales={includeOlderSales} setIncludeOlderSales={setIncludeOlderSales} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} excludedModels={excludedModels} setExcludedModels={setExcludedModels} exclScope={exclScope} setExclScope={setExclScope} />}
     </div>
   );
 }
@@ -1258,7 +1439,11 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 /* ---------- dashboard ---------- */
 const ON_HOLD_STATUS = "On Hold / Reserved";
 
-function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePresold, includeOlderSales, setIncludeOlderSales, invStatusFilter, setInvStatusFilter }) {
+function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, setIncludePresold, includeOlderSales, setIncludeOlderSales, invStatusFilter, setInvStatusFilter, excludedModels, setExcludedModels, exclScope, setExclScope }) {
+  const hasExcl = excludedModels && excludedModels.size > 0;
+  const addExcl = (k) => setExcludedModels((prev) => new Set(prev).add(k));
+  const removeExcl = (k) => setExcludedModels((prev) => { const n = new Set(prev); n.delete(k); return n; });
+  const clearExcl = () => setExcludedModels(new Set());
   const [tab, setTab] = useState(M.hasInv ? "inventory" : "sales");
   const tabs = [
     M.hasInv && ["inventory", "Inventory", Boxes],
@@ -1367,7 +1552,7 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
   const filtersActiveCount =
     (brandFilterSet ? 1 : 0) + (lineFilterSet ? 1 : 0) + (healthFilterSet ? 1 : 0) +
     (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0) +
-    (includeOlderSales ? 1 : 0) + (statusFilterActive ? 1 : 0);
+    (includeOlderSales ? 1 : 0) + (statusFilterActive ? 1 : 0) + (hasExcl ? 1 : 0);
 
   return (
     <div style={{ minHeight: 520 }}>
@@ -1417,8 +1602,32 @@ function Dashboard({ M, dateRange, setDateRange, includePresold, setIncludePreso
                 {M.hasSales && (
                   <DateRangeFilter value={dateRange} onChange={setDateRange} min={M.salesDateMin} max={M.salesDateMax} />
                 )}
+                <ModelExclusionFilter
+                  options={(MFull && MFull.modelOptions) || []}
+                  excluded={excludedModels}
+                  onAdd={addExcl} onRemove={removeExcl} onClear={clearExcl}
+                  scope={exclScope} onScope={setExclScope} />
               </div>
             )}
+          </div>
+        )}
+        {hasExcl && (tab === "inventory" || tab === "sales") && (
+          <div className="mb-5">
+            <ExclusionSummary
+              excludedCount={excludedModels.size}
+              scope={exclScope}
+              rows={tab === "sales"
+                ? [
+                    { label: "Invoice total (revenue)", full: MFull.salesRevenue, adj: MExcl.salesRevenue, fmt: fmtMoney },
+                    { label: "COGS", full: MFull.salesCOGS, adj: MExcl.salesCOGS, fmt: fmtMoney },
+                    { label: "Profit", full: MFull.salesProfit, adj: MExcl.salesProfit, fmt: fmtMoney },
+                    { label: "Profit %", full: MFull.salesProfitPct, adj: MExcl.salesProfitPct, fmt: fmtPct },
+                    { label: "Units sold", full: MFull.salesUnits, adj: MExcl.salesUnits },
+                  ]
+                : [
+                    { label: "Items in stock", full: MFull.invCount, adj: MExcl.invCount },
+                    { label: "Capital tied up", full: MFull.invCost, adj: MExcl.invCost, fmt: fmtMoney },
+                  ]} />
           </div>
         )}
         {tab === "inventory" && <InventoryTab M={M} filters={filters} />}
