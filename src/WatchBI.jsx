@@ -2128,11 +2128,11 @@ function SalesTab({ M, filters }) {
 
       {/* ════ TAX ════ */}
       {sub === "tax" && (
-        <Panel title="Sales tax by state" note="top 5 states · all history">
+        <Panel title="Sales tax by state" note="states with a tax rule · all history">
           <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
             Estimated sales tax owed per shipping state, across your full sales history. Tax applies to state sales
             above each state's threshold: New York 8% over $500k · California 9.5% over $500k · Florida 7% over $100k · Georgia 7% over $100k.
-            States without a rule collect no tax. Showing the top 5 states by tax owed.
+            States without a rule collect no tax, so only the four ruled states are shown.
           </div>
           {!M.hasShippingState && (
             <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
