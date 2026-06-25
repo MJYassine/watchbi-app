@@ -593,9 +593,11 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     });
     out.monthly = Object.values(mo).sort((a, b) => a.month.localeCompare(b.month));
 
-    // by salesperson ("created by") — profit, sales, velocity (median days to sell)
+    // by salesperson ("created by") — profit, sales, velocity (median days to sell).
+    // computed on ALL sales history (a cumulative leaderboard, like tax-by-state),
+    // not the trailing window, so totals aren't truncated to recent activity.
     const bperson = {};
-    rows.forEach((x) => {
+    allSalesRows.forEach((x) => {
       if (!x.salesperson) return;
       const k = x.salesperson;
       bperson[k] = bperson[k] || { salesperson: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
@@ -609,7 +611,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
       medianDays: median(b._days), medianMargin: median(b._m),
     })).sort((a, b) => b.profit - a.profit);
-    out.hasSalesperson = rows.some((x) => x.salesperson);
+    out.hasSalesperson = allSalesRows.some((x) => x.salesperson);
 
     // by type (always available)
     const bt = {};
@@ -1899,7 +1901,7 @@ function SalesTab({ M, filters }) {
       </Panel>
 
       {/* ── By Salesperson ── */}
-      <Panel title="By salesperson" note={M.hasSalesperson ? "profit · sales · velocity" : "needs a 'created by' / salesperson column"}>
+      <Panel title="By salesperson" note={M.hasSalesperson ? "profit · sales · velocity · all history" : "needs a 'created by' / salesperson column"}>
         {!M.hasSalesperson
           ? <Locked msg="Add a 'Created by' (salesperson) column to your sales export to rank who sold what." />
           : (<>
