@@ -388,11 +388,11 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       { label: "0-30", lo: 0, hi: 30 }, { label: "31-60", lo: 31, hi: 60 },
       { label: "61-90", lo: 61, hi: 90 }, { label: "91-180", lo: 91, hi: 180 },
       { label: "180+", lo: 181, hi: 1e9 },
-    ].map((b) => ({ ...b, count: 0, cost: 0 }));
+    ].map((b) => ({ ...b, count: 0, cost: 0, items: [] }));
     filteredItems.forEach((x) => {
       if (x.age == null) return;
       const b = buckets.find((q) => x.age >= q.lo && x.age <= q.hi);
-      if (b) { b.count++; b.cost += x.cost; }
+      if (b) { b.count++; b.cost += x.cost; b.items.push(x); }
     });
     out.aging = buckets;
     out.agedValue = buckets.filter((b) => b.lo >= 91).reduce((s, b) => s + b.cost, 0);
@@ -1482,6 +1482,7 @@ function InventoryTab({ M, filters }) {
   // grade & data-quality drill-down state
   const [expandedGrade, setExpandedGrade] = useState(null);
   const [expandedDQ, setExpandedDQ] = useState(null);
+  const [expandedAge, setExpandedAge] = useState(null);
 
   // top watches to sell — exclude/refill
   const [excludedSell, setExcludedSell] = useState(() => new Set());
@@ -1596,28 +1597,43 @@ function InventoryTab({ M, filters }) {
           </div>
         </Panel>
 
-        <Panel title="Age of inventory" note="days stock held">
-          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={M.aging} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-                <CartesianGrid stroke={C.line} vertical={false} />
-                <XAxis dataKey="label" tick={{ fill: C.dim, fontSize: 11 }} />
-                <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
-                <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
-                <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]}>
-                  {M.aging.map((b, i) => <Cell key={i} fill={b.lo >= 91 ? C.red : b.lo >= 61 ? "#c8863a" : C.gold} />)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-            <div>
-              <ItemTable rows={M.aging.map(b => ({ ...b, label: b.label + " days" }))}
-                cols={[["label","Age bucket"],["count","Items"],["cost","Cost tied up",fmtMoney]]} />
-              {M.agedValue > 0 && (
-                <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginTop: 10 }}>
-                  ⚠ {fmtMoney(M.agedValue)} sitting 91+ days
-                </div>
+        <Panel title="Age of inventory" note="days stock held · click a bucket to see its watches">
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={M.aging} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+              <CartesianGrid stroke={C.line} vertical={false} />
+              <XAxis dataKey="label" tick={{ fill: C.dim, fontSize: 11 }} />
+              <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
+              <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
+              <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]} cursor="pointer"
+                onClick={(d) => { const l = d?.payload?.label ?? d?.label; if (l) setExpandedAge((p) => p === l ? null : l); }}>
+                {M.aging.map((b, i) => <Cell key={i} fill={b.lo >= 91 ? C.red : b.lo >= 61 ? "#c8863a" : C.gold} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <div className="mt-3">
+            <ItemTable rows={M.aging}
+              getRowKey={(r) => r.label}
+              expandedKey={expandedAge}
+              onRowClick={(r) => setExpandedAge((p) => p === r.label ? null : r.label)}
+              renderExpanded={(r) => (
+                r.items.length === 0
+                  ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No watches in this age range.</div>
+                  : <div>
+                      <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                        {r.label} days — {r.items.length} {r.items.length === 1 ? "watch" : "watches"}
+                      </div>
+                      <ItemTable rows={[...r.items].sort((a, b) => b.age - a.age)} cols={WATCH_COLS} />
+                    </div>
               )}
-            </div>
+              cols={[
+                ["label","Age bucket",(v) => v + " days"],
+                ["count","Items"],["cost","Cost tied up",fmtMoney],
+              ]} />
+            {M.agedValue > 0 && (
+              <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginTop: 10 }}>
+                ⚠ {fmtMoney(M.agedValue)} sitting 91+ days
+              </div>
+            )}
           </div>
         </Panel>
 
@@ -1815,6 +1831,7 @@ function SalesTab({ M, filters }) {
   const salesSubTabs = [
     ["performance", "Performance"],
     ["breakdowns", "Breakdowns"],
+    ["salespeople", "Salespeople"],
     ["tax", "Tax"],
   ];
   return (
@@ -1899,9 +1916,11 @@ function SalesTab({ M, filters }) {
             </div>
           </>)}
       </Panel>
+      </>)}
 
-      {/* ── By Salesperson ── */}
-      <Panel title="By salesperson" note={M.hasSalesperson ? "profit · sales · velocity · all history" : "needs a 'created by' / salesperson column"}>
+      {/* ════ SALESPEOPLE ════ */}
+      {sub === "salespeople" && (
+        <Panel title="By salesperson" note={M.hasSalesperson ? "profit · sales · velocity · all history" : "needs a 'created by' / salesperson column"}>
         {!M.hasSalesperson
           ? <Locked msg="Add a 'Created by' (salesperson) column to your sales export to rank who sold what." />
           : (<>
@@ -1939,8 +1958,8 @@ function SalesTab({ M, filters }) {
               ]} />
             </div>
           </>)}
-      </Panel>
-      </>)}
+        </Panel>
+      )}
 
       {/* ════ BREAKDOWNS ════ */}
       {sub === "breakdowns" && (<>
