@@ -155,6 +155,16 @@ function normalizeCondition(v) {
   if (s.includes("used") || s.includes("pre-owned") || s.includes("preowned") || s.includes("pre owned") || s.includes("second")) return "Used";
   return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
 }
+/* rank conditions best -> worst so "New" sorts first, then down in quality */
+function conditionRank(c) {
+  const s = String(c || "").toLowerCase();
+  if (s === "new") return 0;
+  if (s.includes("mint") || s.includes("excellent") || s.includes("very good")) return 1;
+  if (s.includes("good")) return 2;
+  if (s.includes("used") || s.includes("fair")) return 3;
+  if (!s || s === "unspecified") return 99;
+  return 50;
+}
 
 /* normalize a free-text payment value to Paid / Unpaid / Voided */
 function normalizePayment(v) {
@@ -372,7 +382,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
       bbc[k].count++; bbc[k].cost += x.cost;
     });
     out.invByBrandCondition = Object.values(bbc)
-      .sort((a, b) => a.brand.localeCompare(b.brand) || a.condition.localeCompare(b.condition));
+      .sort((a, b) => a.brand.localeCompare(b.brand) || (conditionRank(a.condition) - conditionRank(b.condition)) || a.condition.localeCompare(b.condition));
     out.invHasCondition = filteredItems.some((x) => x.condition && x.condition !== "Unspecified");
 
     const byLine = {};
@@ -705,7 +715,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         key: b.key, brand: b.brand, condition: b.condition, units: b.units, profit: b.profit, revenue: b.revenue,
         profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
         medianMargin: median(b._m),
-      })).sort((a, b) => a.brand.localeCompare(b.brand) || a.condition.localeCompare(b.condition));
+      })).sort((a, b) => a.brand.localeCompare(b.brand) || (conditionRank(a.condition) - conditionRank(b.condition)) || a.condition.localeCompare(b.condition));
       out.hasCondition = rows.some((x) => x.condition && x.condition !== "Unspecified");
 
       // by product line
