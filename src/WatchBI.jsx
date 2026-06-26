@@ -324,7 +324,7 @@ const median = (arr) => {
 /* =========================================================================
    METRICS ENGINE
    ========================================================================= */
-function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, invStatusFilter, excludedModels) {
+function computeMetrics(datasets, dateRange, includePresold, windowDays, invStatusFilter, excludedModels) {
   const inv = datasets.find((d) => d.role === "inventory");
   const sal = datasets.find((d) => d.role === "sales");
   const today = new Date();
@@ -570,31 +570,31 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     });
     // drop excluded models from every sales total
     if (hasExcl) rows = rows.filter((x) => !excludedModels.has(x.modelKey));
-    // keep the full mapped set (pre-window, pre-presold) for tax/state liability,
-    // which is a cumulative financial view rather than a recent-performance view
-    const allSalesRows = rows;
-    // overall date span of the sales data (used for the date-range picker bounds)
+
+    // overall date span of the data (used for the date-range picker bounds) — full, pre-window
     const allSaleDates = rows.map((x) => x.saleDate).filter(Boolean);
     out.salesDateMin = allSaleDates.length ? new Date(Math.min(...allSaleDates.map((d) => d.getTime()))) : null;
     out.salesDateMax = allSaleDates.length ? new Date(Math.max(...allSaleDates.map((d) => d.getTime()))) : null;
 
-    // apply optional date-range filter (rows with no sale date are kept either way);
-    // if the user hasn't picked a custom range, default to the trailing 45-day
-    // sales history — this also drives the Buy Signals tab.
-    out.salesWindowDays = 45;
+    // Sales period — applies to the ENTIRE sales analysis (KPIs, breakdowns, Buy
+    // Signals, Salespeople, Tax) so every section reflects the same timeframe.
+    // Precedence: explicit custom date range > "last N days from today" > all time.
+    out.salesWindowDays = windowDays || null;
     if (dateRange && (dateRange.start || dateRange.end)) {
       const startT = dateRange.start ? new Date(dateRange.start + "T00:00:00").getTime() : -Infinity;
       const endT = dateRange.end ? new Date(dateRange.end + "T23:59:59").getTime() : Infinity;
-      rows = rows.filter((x) => !x.saleDate || (x.saleDate.getTime() >= startT && x.saleDate.getTime() <= endT));
-      out.usingDefaultWindow = false;
-    } else if (out.salesDateMax && !includeOlderSales) {
-      const windowStartT = out.salesDateMax.getTime() - out.salesWindowDays * 86400000;
+      rows = rows.filter((x) => x.saleDate && x.saleDate.getTime() >= startT && x.saleDate.getTime() <= endT);
+      out.windowMode = "custom";
+    } else if (windowDays) {
+      const windowStartT = today.getTime() - windowDays * 86400000;
       out.windowStart = new Date(windowStartT);
       rows = rows.filter((x) => x.saleDate && x.saleDate.getTime() >= windowStartT);
-      out.usingDefaultWindow = true;
+      out.windowMode = "window";
     } else {
-      out.usingDefaultWindow = false;
+      out.windowMode = "all";
     }
+    // every downstream total (incl. tax & salesperson) uses the same windowed set
+    const allSalesRows = rows;
 
     // "presold" = sold within 0-2 days of purchase — likely flipped before it ever
     // hit the floor, so it's excluded from sell-through analysis by default.
@@ -616,10 +616,10 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     })();
 
     // span of the sales data, in weeks — used for sell-through velocity.
-    // when the default 45-day window is active we always use 45 days as the
-    // denominator so sparse or single-sale windows don't overstate velocity.
+    // when a "last N days" window is active we use N/7 as the denominator so
+    // sparse or single-sale windows don't overstate velocity.
     out.salesWeeks = (() => {
-      if (out.usingDefaultWindow) return out.salesWindowDays / 7;
+      if (out.windowMode === "window") return windowDays / 7;
       const ds = rows.map((x) => x.saleDate).filter(Boolean).map((d) => d.getTime());
       if (ds.length < 2) return 1;
       const span = (Math.max(...ds) - Math.min(...ds)) / (7 * 86400000);
@@ -637,8 +637,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
     out.monthly = Object.values(mo).sort((a, b) => a.month.localeCompare(b.month));
 
     // by salesperson ("created by") — profit, sales, velocity (median days to sell).
-    // computed on ALL sales history (a cumulative leaderboard, like tax-by-state),
-    // not the trailing window, so totals aren't truncated to recent activity.
+    // respects the active sales period like every other section.
     const bperson = {};
     allSalesRows.forEach((x) => {
       if (!x.salesperson) return;
@@ -680,7 +679,7 @@ function computeMetrics(datasets, dateRange, includePresold, includeOlderSales, 
         medianMargin: median(b._m),
       }));
 
-    // ── sales tax by shipping state (all history) ──
+    // ── sales tax by shipping state (respects the active sales period) ──
     const bst = {};
     allSalesRows.forEach((x) => {
       const st = x.shippingState || "Unspecified";
@@ -1155,26 +1154,35 @@ function PresoldFilter({ value, onChange, count }) {
   );
 }
 
-/* 45-day sales window toggle */
-function SalesWindowFilter({ value, onChange, windowDays, salesDateMax }) {
-  const opts = [[false, `Last ${windowDays ?? 45} days (default)`], [true, "Include 45+ day sales"]];
+/* sales-period control: "last N days from today" window (adjustable) vs all time.
+   applies to every sales-derived section so the whole dashboard shares one period. */
+function SalesPeriodFilter({ on, onToggle, days, onDays }) {
+  const opts = [[true, `Last ${days} days`], [false, "All time"]];
   return (
     <div className="flex flex-wrap items-center gap-2 mb-1">
       <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", minWidth: 50 }}>
-        History
+        Period
       </span>
       {opts.map(([k, lbl]) => (
-        <button key={String(k)} onClick={() => onChange(k)}
+        <button key={String(k)} onClick={() => onToggle(k)}
           style={{
             fontFamily: SANS, borderRadius: 999, fontSize: 12,
-            border: `1px solid ${value === k ? C.gold : C.line}`,
-            background: value === k ? C.gold : "transparent",
-            color: value === k ? C.bg : C.dim,
+            border: `1px solid ${on === k ? C.gold : C.line}`,
+            background: on === k ? C.gold : "transparent",
+            color: on === k ? C.bg : C.dim,
           }} className="px-3 py-1">{lbl}</button>
       ))}
+      {on && (
+        <span className="flex items-center gap-1" style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+          window:
+          <input type="number" min={1} max={3650} value={days}
+            onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n > 0) onDays(n); }}
+            style={{ width: 64, fontFamily: SANS, fontSize: 12, color: C.text, background: C.bg, border: `1px solid ${C.line}`, borderRadius: 8, padding: "3px 8px" }} />
+          days from today
+        </span>
+      )}
       <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
-        By default, Sales and Buy Signals use the trailing {windowDays ?? 45} days{salesDateMax ? ` (through ${salesDateMax.toISOString().slice(0, 10)})` : ""}.
-        {value ? " Now showing the full sales history instead." : " Toggle to include older sales."}
+        {on ? "All sales figures reflect this window." : "Showing all sales on record."}
       </span>
     </div>
   );
@@ -1283,7 +1291,10 @@ export default function WatchBI() {
   const active = datasets.filter((d) => d.role !== "ignore");
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [includePresold, setIncludePresold] = useState(false);
-  const [includeOlderSales, setIncludeOlderSales] = useState(false);
+  // sales period: "last N days from today" window, on by default (45 days), adjustable / switchable
+  const [salesWindowOn, setSalesWindowOn] = useState(true);
+  const [salesWindowDays, setSalesWindowDays] = useState(45);
+  const windowDays = salesWindowOn ? salesWindowDays : null;
   // starts null (all statuses included); Dashboard sets this to exclude
   // "On Hold / Reserved" after the first metrics render via useEffect.
   const [invStatusFilter, setInvStatusFilter] = useState(null);
@@ -1293,9 +1304,9 @@ export default function WatchBI() {
   const hasExcl = excludedModels.size > 0;
 
   // full (no exclusions) metrics — always computed; drives the model picker + "with" view
-  const metricsFull = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter, null) : null), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter]);
+  const metricsFull = useMemo(() => (stage === "dash" ? computeMetrics(active, dateRange, includePresold, windowDays, invStatusFilter, null) : null), [stage, datasets, dateRange, includePresold, windowDays, invStatusFilter]);
   // adjusted metrics — same but with excluded models removed
-  const metricsExcl = useMemo(() => (stage === "dash" && hasExcl ? computeMetrics(active, dateRange, includePresold, includeOlderSales, invStatusFilter, excludedModels) : metricsFull), [stage, datasets, dateRange, includePresold, includeOlderSales, invStatusFilter, excludedModels, hasExcl, metricsFull]);
+  const metricsExcl = useMemo(() => (stage === "dash" && hasExcl ? computeMetrics(active, dateRange, includePresold, windowDays, invStatusFilter, excludedModels) : metricsFull), [stage, datasets, dateRange, includePresold, windowDays, invStatusFilter, excludedModels, hasExcl, metricsFull]);
   // which one drives the dashboard body: dashboard-wide exclusion → adjusted; summary-only → full
   const metrics = (hasExcl && exclScope === "dashboard") ? metricsExcl : metricsFull;
 
@@ -1322,7 +1333,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} MFull={metricsFull} MExcl={metricsExcl} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} includeOlderSales={includeOlderSales} setIncludeOlderSales={setIncludeOlderSales} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} excludedModels={excludedModels} setExcludedModels={setExcludedModels} exclScope={exclScope} setExclScope={setExclScope} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} MFull={metricsFull} MExcl={metricsExcl} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} salesWindowOn={salesWindowOn} setSalesWindowOn={setSalesWindowOn} salesWindowDays={salesWindowDays} setSalesWindowDays={setSalesWindowDays} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} excludedModels={excludedModels} setExcludedModels={setExcludedModels} exclScope={exclScope} setExclScope={setExclScope} />}
     </div>
   );
 }
@@ -1439,7 +1450,7 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 /* ---------- dashboard ---------- */
 const ON_HOLD_STATUS = "On Hold / Reserved";
 
-function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, setIncludePresold, includeOlderSales, setIncludeOlderSales, invStatusFilter, setInvStatusFilter, excludedModels, setExcludedModels, exclScope, setExclScope }) {
+function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, setIncludePresold, salesWindowOn, setSalesWindowOn, salesWindowDays, setSalesWindowDays, invStatusFilter, setInvStatusFilter, excludedModels, setExcludedModels, exclScope, setExclScope }) {
   const hasExcl = excludedModels && excludedModels.size > 0;
   const addExcl = (k) => setExcludedModels((prev) => new Set(prev).add(k));
   const removeExcl = (k) => setExcludedModels((prev) => { const n = new Set(prev); n.delete(k); return n; });
@@ -1552,7 +1563,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
   const filtersActiveCount =
     (brandFilterSet ? 1 : 0) + (lineFilterSet ? 1 : 0) + (healthFilterSet ? 1 : 0) +
     (stockFilter !== "all" ? 1 : 0) + (dateActive ? 1 : 0) + (includePresold ? 1 : 0) +
-    (includeOlderSales ? 1 : 0) + (statusFilterActive ? 1 : 0) + (hasExcl ? 1 : 0);
+    (salesWindowOn ? 1 : 0) + (statusFilterActive ? 1 : 0) + (hasExcl ? 1 : 0);
 
   return (
     <div style={{ minHeight: 520 }}>
@@ -1594,7 +1605,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
                   <ChipFilter label="Status" items={allStatuses} selected={selectedStatuses} onToggle={toggleStatus} onAll={selectAllStatuses} />
                 )}
                 {M.hasSales && (
-                  <SalesWindowFilter value={includeOlderSales} onChange={setIncludeOlderSales} windowDays={M.salesWindowDays} salesDateMax={M.salesDateMax} />
+                  <SalesPeriodFilter on={salesWindowOn} onToggle={setSalesWindowOn} days={salesWindowDays} onDays={setSalesWindowDays} />
                 )}
                 {M.hasSales && (
                   <PresoldFilter value={includePresold} onChange={setIncludePresold} count={M.presoldCount} />
@@ -2055,10 +2066,10 @@ function SalesTab({ M, filters }) {
   ];
   return (
     <div className="flex flex-col gap-5">
-      {M.usingDefaultWindow && (
+      {M.windowMode === "window" && (
         <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
-          Showing the trailing {M.salesWindowDays}-day sales history (through {M.salesDateMax ? M.salesDateMax.toISOString().slice(0, 10) : "--"}) —
-          this is also what Buy Signals is based on. Pick a custom date range above to override.
+          Showing the last {M.salesWindowDays} days of sales (from today). Every section below — including Salespeople and Tax —
+          reflects this window. Switch the Period filter to "All time" to see everything.
         </div>
       )}
       {/* ── KPIs ── */}
@@ -2139,7 +2150,7 @@ function SalesTab({ M, filters }) {
 
       {/* ════ SALESPEOPLE ════ */}
       {sub === "salespeople" && (
-        <Panel title="By salesperson" note={M.hasSalesperson ? "profit · sales · velocity · all history" : "needs a 'created by' / salesperson column"}>
+        <Panel title="By salesperson" note={M.hasSalesperson ? (M.windowMode === "window" ? `profit · sales · velocity · last ${M.salesWindowDays} days` : "profit · sales · velocity") : "needs a 'created by' / salesperson column"}>
         {!M.hasSalesperson
           ? <Locked msg="Add a 'Created by' (salesperson) column to your sales export to rank who sold what." />
           : (<>
@@ -2347,9 +2358,9 @@ function SalesTab({ M, filters }) {
 
       {/* ════ TAX ════ */}
       {sub === "tax" && (
-        <Panel title="Sales tax by state" note="states with a tax rule · all history">
+        <Panel title="Sales tax by state" note={M.windowMode === "window" ? `states with a tax rule · last ${M.salesWindowDays} days` : "states with a tax rule · all sales"}>
           <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-            Estimated sales tax owed per shipping state, across your full sales history. Tax applies to state sales
+            Estimated sales tax owed per shipping state, over the {M.windowMode === "window" ? `last ${M.salesWindowDays} days of sales` : "full sales history"}. Tax applies to state sales
             above each state's threshold: New York 8% over $500k · California 9.5% over $500k · Florida 7% over $100k · Georgia 7% over $100k.
             States without a rule collect no tax, so only the four ruled states are shown.
           </div>
@@ -2528,9 +2539,9 @@ function BuyTab({ M, filters, includePresold }) {
 
   return (
     <div className="flex flex-col gap-5">
-      {M.usingDefaultWindow && (
+      {M.windowMode === "window" && (
         <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
-          Based on the trailing {M.salesWindowDays}-day sales history (through {M.salesDateMax ? M.salesDateMax.toISOString().slice(0, 10) : "--"}).
+          Based on the last {M.salesWindowDays} days of sales (from today).
           Models sold only 1–2 times in that window are excluded from rankings below — not enough history to trust.
         </div>
       )}
