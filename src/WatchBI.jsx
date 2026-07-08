@@ -2718,6 +2718,55 @@ function BuyHierarchy({ brands }) {
   />;
 }
 
+/* Funding Scenarios: given a budget, spread it across the top buy-signal models
+   (one unit each, down the ranking) using projected cost = avg historical total cost */
+function FundingScenarios({ ranking }) {
+  const [budget, setBudget] = useState(50000);
+  const priced = ranking.filter((m) => m.avgCost && m.avgCost > 0);
+  let remaining = budget;
+  const picks = [];
+  for (const m of priced) {
+    if (m.avgCost <= remaining) { picks.push(m); remaining -= m.avgCost; }
+  }
+  const spent = budget - remaining;
+  const presets = [20000, 50000, 100000];
+  return (
+    <div className="flex flex-col gap-3">
+      <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12 }}>
+        Pick a budget and we'll spread it across the highest buy-score watches — one unit each down the ranking — using each
+        model's projected cost (its average historical total cost). This avoids dumping the whole budget into one reference.
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {presets.map((p) => (
+          <button key={p} onClick={() => setBudget(p)}
+            style={{ fontFamily: SANS, fontSize: 13, borderRadius: 999,
+              border: `1px solid ${budget === p ? C.gold : C.line}`,
+              background: budget === p ? C.gold : "transparent",
+              color: budget === p ? C.bg : C.dim }} className="px-4 py-1.5">{fmtMoney(p)}</button>
+        ))}
+        <span className="flex items-center gap-1" style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+          custom $
+          <input type="number" min={0} step={1000} value={budget}
+            onChange={(e) => { const n = parseInt(e.target.value, 10); setBudget(isNaN(n) ? 0 : n); }}
+            style={{ width: 110, fontFamily: SANS, fontSize: 13, color: C.text, background: C.bg, border: `1px solid ${C.line}`, borderRadius: 8, padding: "4px 8px" }} />
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        <Stat label="Watches to buy" value={picks.length} />
+        <Stat label="Projected spend" value={fmtMoney(spent)} sub={`of ${fmtMoney(budget)} budget`} />
+        <Stat label="Left over" value={fmtMoney(remaining)} sub="too small for the next pick" />
+        <Stat label="Projected profit" value={fmtMoney(picks.reduce((s, m) => s + (m.avgProfit || 0), 0))} sub="if each sells at avg profit" />
+      </div>
+      {picks.length === 0
+        ? <Locked msg={priced.length === 0 ? "No models have a cost basis yet (need historical sales cost)." : "Budget too small for even the cheapest ranked watch."} />
+        : <ItemTable rows={picks} cols={[
+            ["brand","Brand"],["model","Model"],["avgCost","Proj. cost",fmtMoney],
+            ["avgProfit","Avg profit",fmtMoney],["medianDays","Median days"],["buyScore","Score",(v) => v?.toFixed(3)],
+          ]} />}
+    </div>
+  );
+}
+
 function BuyTab({ M, filters, includePresold }) {
   const [g1, setG1] = useState("model"); // fastest
   const [g2, setG2] = useState("model"); // best profit
@@ -2850,6 +2899,11 @@ function BuyTab({ M, filters, includePresold }) {
           {" "}{includePresold ? "Presold sales (0–2 days) are included." : "Presold sales (0–2 days) are excluded."}
         </div>
         <BuyHierarchy brands={buyBrands} />
+      </QuestionCard>
+
+      {/* Funding scenarios */}
+      <QuestionCard num="$" question="Funding scenarios — what to buy with your budget">
+        <FundingScenarios ranking={ranking} />
       </QuestionCard>
 
       {/* Fastest 10 */}
