@@ -155,6 +155,18 @@ function normalizeCondition(v) {
   if (s.includes("used") || s.includes("pre-owned") || s.includes("preowned") || s.includes("pre owned") || s.includes("second")) return "Used";
   return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
 }
+/* Display name for a watch in the brand/line/model breakdowns.
+   - has a name              -> the name
+   - brand but no name        -> "Unknown" (bucketed under that brand)
+   - no brand and no name     -> null  (fully unknown → hidden from charts) */
+function modelDisplayName(brand, modelName) {
+  const b = brand != null && String(brand).trim();
+  const n = modelName != null && String(modelName).trim();
+  if (n) return String(modelName).trim();
+  if (b) return "Unknown";
+  return null;
+}
+
 /* canonical key identifying a watch model for the exclusion filter — prefers
    the reference/model number, falls back to the model name */
 function modelKeyOf(modelNumber, modelName) {
@@ -362,6 +374,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         brandNorm,
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName],
+        chartName: modelDisplayName(r[m.brand], r[m.modelName]),
         modelNumber: r[m.modelNumber] || null,
         modelKey: modelKeyOf(r[m.modelNumber], r[m.modelName]),
         cost: cost || 0,
@@ -390,8 +403,10 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     out.invCount = filteredItems.length;
     out.invCost = filteredItems.reduce((s, x) => s + x.cost, 0);
 
+    // fully-unknown items (no brand AND no name) are hidden from the breakdowns
+    const namedItems = filteredItems.filter((x) => x.chartName != null);
     const byBrand = {};
-    filteredItems.forEach((x) => {
+    namedItems.forEach((x) => {
       const k = x.brand;
       byBrand[k] = byBrand[k] || { brand: k, count: 0, cost: 0 };
       byBrand[k].count++; byBrand[k].cost += x.cost;
@@ -401,7 +416,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
     // by brand & condition (new / used)
     const bbc = {};
-    filteredItems.forEach((x) => {
+    namedItems.forEach((x) => {
       const cond = x.condition || "Unspecified";
       const k = x.brand + " · " + cond;
       bbc[k] = bbc[k] || { key: k, brand: x.brand, condition: cond, count: 0, cost: 0 };
@@ -412,7 +427,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     out.invHasCondition = filteredItems.some((x) => x.condition && x.condition !== "Unspecified");
 
     const byLine = {};
-    filteredItems.filter((x) => x.line).forEach((x) => {
+    namedItems.filter((x) => x.line).forEach((x) => {
       const lbl = lineLabel(x.brand, x.line);
       const k = x.brand + " · " + lbl;
       byLine[k] = byLine[k] || { key: k, brand: x.brand, line: lbl, count: 0, cost: 0 };
@@ -558,6 +573,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         brand: r[m.brand] || null, brandNorm,
         line: findLine(brandNorm, r[m.modelName]),
         modelName: r[m.modelName] || null,
+        chartName: modelDisplayName(r[m.brand], r[m.modelName]),
         modelNumber: r[m.modelNumber] || null,
         modelKey: modelKeyOf(r[m.modelNumber], r[m.modelName]),
         type: r[m.inventoryType] || "Unspecified",
@@ -718,9 +734,11 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
     // brand-level (only if brand present on sales)
     out.salesHasBrand = rows.some((x) => x.brand);
+    // fully-unknown watches (no brand AND no name) are hidden from every breakdown
+    const namedRows = rows.filter((x) => x.chartName != null);
     if (out.salesHasBrand) {
       const bb = {};
-      rows.forEach((x) => {
+      namedRows.forEach((x) => {
         const k = x.brand || "Unknown";
         bb[k] = bb[k] || { brand: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
         bb[k].units++; bb[k].profit += x.profit; bb[k].revenue += x.price; bb[k].cost += x.cost;
@@ -735,7 +753,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
       // by brand & condition (new / used)
       const bc = {};
-      rows.forEach((x) => {
+      namedRows.forEach((x) => {
         const brand = x.brand || "Unknown";
         const cond = x.condition || "Unspecified";
         const k = brand + " · " + cond;
@@ -752,7 +770,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
       // by product line
       const bl = {};
-      rows.forEach((x) => {
+      namedRows.forEach((x) => {
         if (!x.line) return;
         const lbl = lineLabel(x.brand, x.line);
         const k = (x.brand || "Unknown") + " · " + lbl;
@@ -772,8 +790,8 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
       // by model frequency + ranking + buy score
       const bm = {};
-      rows.forEach((x) => {
-        const name = x.modelName || x.brand;
+      namedRows.forEach((x) => {
+        const name = x.chartName;
         const k = (x.brand || "") + "|" + name;
         bm[k] = bm[k] || { key: k, brand: x.brand, line: lineLabel(x.brand, x.line), model: name, brandNorm: x.brandNorm, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
         bm[k].units++; bm[k].profit += x.profit; bm[k].revenue += x.price; bm[k].cost += x.cost;
@@ -783,6 +801,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       let models = Object.values(bm).map((b) => ({
         brand: b.brand, line: b.line, model: b.model, units: b.units, profit: b.profit, revenue: b.revenue,
         avgProfit: b.profit / b.units,
+        avgCost: b.units ? b.cost / b.units : null,
         profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
         medianDays: median(b._days), medianMargin: median(b._m),
         stock: out._stock ? (out._stock[(b.brandNorm || "") + "|" + String(b.model || "").toLowerCase()] ?? null) : null,
