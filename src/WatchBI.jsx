@@ -499,6 +499,24 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     out.hasPaymentStatus = items.some((x) => x.paymentStatus && x.paymentStatus !== "Unspecified");
     out.hasInvType = items.some((x) => x.invType);
 
+    // per-model & per-brand inventory aggregates for the projected-vs-historical join.
+    // projected profit/margin is computed only on the priced (target-wholesale) portion.
+    const invModel = {}, invBrand = {};
+    namedItems.forEach((x) => {
+      const brand = (x.brand && String(x.brand).trim()) || "Unknown";
+      const priced = x.targetWholesale && x.targetWholesale > 0;
+      const mk = x.modelKey || (brand + "|" + x.chartName);
+      const bk = brand;
+      if (!invModel[mk]) invModel[mk] = { key: mk, brand, model: x.chartName, stock: 0, pricedCost: 0, projProfit: 0 };
+      if (!invBrand[bk]) invBrand[bk] = { key: bk, brand, stock: 0, pricedCost: 0, projProfit: 0 };
+      for (const agg of [invModel[mk], invBrand[bk]]) {
+        agg.stock++;
+        if (priced) { agg.pricedCost += x.cost; agg.projProfit += (x.targetWholesale - x.cost); }
+      }
+    });
+    out._invModelAgg = invModel;
+    out._invBrandAgg = invBrand;
+
     // supplier ("purchased from") spend, from inventory purchase cost
     out._invSupplierAgg = {};
     filteredItems.forEach((x) => {
@@ -592,6 +610,20 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     });
     // full mapped set (before the period window) — liabilities reflect all invoices
     const fullSalesRows = rows;
+
+    // all-time historical aggregates by model & brand (for projected-vs-historical health)
+    const histModel = {}, histBrand = {};
+    fullSalesRows.filter((x) => x.chartName != null).forEach((x) => {
+      const brand = (x.brand && String(x.brand).trim()) || "Unknown";
+      const mk = x.modelKey || (brand + "|" + x.chartName);
+      if (!histModel[mk]) histModel[mk] = { key: mk, brand, model: x.chartName, sold: 0, profit: 0, cost: 0 };
+      if (!histBrand[brand]) histBrand[brand] = { key: brand, brand, sold: 0, profit: 0, cost: 0 };
+      for (const agg of [histModel[mk], histBrand[brand]]) {
+        agg.sold++; agg.profit += x.profit; agg.cost += x.cost;
+      }
+    });
+    out._histModelAgg = histModel;
+    out._histBrandAgg = histBrand;
 
     // ── overpaid invoices (negative amount owed) — a liability regardless of period ──
     out.hasAmountOwed = m.amountOwed != null && fullSalesRows.some((x) => x.amountOwed != null);
@@ -884,6 +916,31 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
   // distinct models present in the data, for the exclusion autocomplete
   out.modelOptions = Object.values(modelOptionMap).sort((a, b) => a.label.localeCompare(b.label));
+
+  // ── projected profit (current stock) vs historical profit (all past sales) ──
+  const joinProjHist = (invAgg, histAgg) => {
+    invAgg = invAgg || {}; histAgg = histAgg || {};
+    const keys = new Set([...Object.keys(invAgg), ...Object.keys(histAgg)]);
+    return [...keys].map((k) => {
+      const iv = invAgg[k], hv = histAgg[k];
+      const projMargin = iv && iv.pricedCost ? (iv.projProfit / iv.pricedCost) * 100 : null;
+      const histMargin = hv && hv.cost ? (hv.profit / hv.cost) * 100 : null;
+      return {
+        brand: (iv && iv.brand) || (hv && hv.brand),
+        model: (iv && iv.model) || (hv && hv.model),
+        stock: (iv && iv.stock) || 0,
+        sold: (hv && hv.sold) || 0,
+        projProfit: (iv && iv.projProfit) || 0,
+        histProfit: (hv && hv.profit) || 0,
+        projMargin, histMargin,
+        delta: (projMargin != null && histMargin != null) ? projMargin - histMargin : null,
+      };
+    }).sort((a, b) => b.projProfit - a.projProfit);
+  };
+  out.projVsHistModels = joinProjHist(out._invModelAgg, out._histModelAgg);
+  out.projVsHistBrands = joinProjHist(out._invBrandAgg, out._histBrandAgg);
+  out.hasProjVsHist = (out.projVsHistModels.length > 0) && (out.hasInv && out.hasSales);
+  delete out._invModelAgg; delete out._invBrandAgg; delete out._histModelAgg; delete out._histBrandAgg;
 
   return out;
 }
@@ -1857,6 +1914,7 @@ function InventoryTab({ M, filters }) {
   const [expandedGrade, setExpandedGrade] = useState(null);
   const [expandedDQ, setExpandedDQ] = useState(null);
   const [expandedAge, setExpandedAge] = useState(null);
+  const [phView, setPhView] = useState("model"); // projected-vs-historical: model | brand
 
   // top watches to sell — exclude/refill
   const [excludedSell, setExcludedSell] = useState(() => new Set());
@@ -2111,8 +2169,8 @@ function InventoryTab({ M, filters }) {
       )}
 
       {/* ════ PROJECTIONS ════ */}
-      {sub === "projections" && (
-        M.projItems === 0
+      {sub === "projections" && (<>
+        {M.projItems === 0
           ? <Panel title="Projected profit"><Locked msg="No items have a target wholesale price yet. Add 'Target Wholesale Price' to your inventory export." /></Panel>
           : fProjByModel.length === 0
           ? <Panel title="Projected profit"><Locked msg="No priced items match the current brand filter." /></Panel>
@@ -2136,8 +2194,33 @@ function InventoryTab({ M, filters }) {
                 ["marginPct","Margin %",(v) => fmtPct(v)],
               ]} />
             </Panel>
-          </>)
-      )}
+          </>)}
+
+        {/* Projected vs historical health */}
+        <Panel title="Projected vs historical profit" note="how current stock's projected margin compares to what you've actually realized">
+          {!M.hasProjVsHist
+            ? <Locked msg="Needs both inventory (with target wholesale prices) and sales history loaded." />
+            : (<>
+                <div className="flex gap-1 mb-3">
+                  {[["model","By model"],["brand","By brand"]].map(([k, lbl]) => (
+                    <button key={k} onClick={() => setPhView(k)}
+                      style={{ fontFamily: SANS, borderRadius: 8, fontSize: 12,
+                        border: `1px solid ${phView === k ? C.gold : C.line}`,
+                        background: phView === k ? C.gold : "transparent",
+                        color: phView === k ? C.bg : C.dim }} className="px-3 py-1">{lbl}</button>
+                  ))}
+                </div>
+                <ItemTable rows={(phView === "model" ? M.projVsHistModels : M.projVsHistBrands).slice(0, 40)} cols={[
+                  ["brand","Brand"],
+                  ...(phView === "model" ? [["model","Model"]] : []),
+                  ["stock","In stock"],["sold","Sold"],
+                  ["projProfit","Projected $",fmtMoney],["histProfit","Historical $",fmtMoney],
+                  ["projMargin","Proj. margin",(v) => fmtPct(v)],["histMargin","Hist. margin",(v) => fmtPct(v)],
+                  ["delta","Δ margin",(v) => v == null ? "—" : <span style={{ color: v >= 0 ? C.green : C.red }}>{(v >= 0 ? "+" : "") + v.toFixed(1) + "%"}</span>],
+                ]} />
+              </>)}
+        </Panel>
+      </>)}
     </div>
   );
 }
