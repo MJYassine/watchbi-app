@@ -867,6 +867,27 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       const modelsForBuy = models.filter((x) => x.units >= 3);
       out.ranking = [...modelsForBuy].sort((a, b) => b.buyScore - a.buyScore);
 
+      // buy-signals hierarchy: brand → product line → model, ranked by summed buy score
+      const bh = {};
+      modelsForBuy.forEach((mo) => {
+        const brand = mo.brand || "Unknown";
+        const line = mo.line || (brand + " — Other");
+        bh[brand] = bh[brand] || { brand, score: 0, units: 0, profit: 0, projCost: 0, _lines: {} };
+        const B = bh[brand];
+        B.score += mo.buyScore || 0; B.units += mo.units; B.profit += mo.profit; B.projCost += (mo.avgCost || 0);
+        B._lines[line] = B._lines[line] || { line, brand, score: 0, units: 0, profit: 0, projCost: 0, models: [] };
+        const L = B._lines[line];
+        L.score += mo.buyScore || 0; L.units += mo.units; L.profit += mo.profit; L.projCost += (mo.avgCost || 0);
+        L.models.push(mo);
+      });
+      out.buyHierarchy = Object.values(bh).map((B) => ({
+        brand: B.brand, score: +B.score.toFixed(3), units: B.units, profit: B.profit, projCost: B.projCost,
+        lines: Object.values(B._lines).map((L) => ({
+          line: L.line, brand: L.brand, score: +L.score.toFixed(3), units: L.units, profit: L.profit, projCost: L.projCost,
+          models: [...L.models].sort((a, b) => b.buyScore - a.buyScore),
+        })).sort((a, b) => b.score - a.score),
+      })).sort((a, b) => b.score - a.score);
+
       // combined velocity × profit ranking (for Q3)
       const maxP2 = Math.max(...modelsForBuy.map((x) => x.avgProfit || 0)) || 1;
       const maxD2 = Math.max(...modelsForBuy.map((x) => x.medianDays || 0)) || 1;
@@ -2658,6 +2679,45 @@ function GranularityToggle({ value, onChange }) {
   );
 }
 
+/* Buy Signals hierarchy: Brand → Product line → Model (with projected cost) */
+function BuyModelTable({ models }) {
+  return <ItemTable rows={models} cols={[
+    ["model","Model"],["units","Units"],["profit","Profit $",fmtMoney],
+    ["avgProfit","Avg profit",fmtMoney],["avgCost","Proj. cost",fmtMoney],
+    ["medianDays","Median days"],["buyScore","Score",(v) => v?.toFixed(3)],
+    ["health","Stock health",(v,r) => <HealthBadge health={v} weeksOfStock={r?.weeksOfStock} />],
+  ]} />;
+}
+function BuyLineTable({ lines }) {
+  const [open, setOpen] = useState(null);
+  return <ItemTable rows={lines}
+    getRowKey={(r) => r.line} expandedKey={open}
+    onRowClick={(r) => setOpen((p) => p === r.line ? null : r.line)}
+    renderExpanded={(r) => (
+      <div>
+        <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">{r.line} — models</div>
+        <BuyModelTable models={r.models} />
+      </div>
+    )}
+    cols={[["line","Product line"],["units","Units"],["profit","Profit $",fmtMoney],["projCost","Proj. cost",fmtMoney],["score","Score",(v) => v?.toFixed(3)]]}
+  />;
+}
+function BuyHierarchy({ brands }) {
+  const [open, setOpen] = useState(null);
+  if (!brands.length) return <Locked msg="No ranked data available for this filter." />;
+  return <ItemTable rows={brands}
+    getRowKey={(r) => r.brand} expandedKey={open}
+    onRowClick={(r) => setOpen((p) => p === r.brand ? null : r.brand)}
+    renderExpanded={(r) => (
+      <div>
+        <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">{r.brand} — product lines</div>
+        <BuyLineTable lines={r.lines} />
+      </div>
+    )}
+    cols={[["brand","Brand"],["units","Units"],["profit","Profit $",fmtMoney],["projCost","Proj. cost",fmtMoney],["score","Buy score",(v) => v?.toFixed(3)]]}
+  />;
+}
+
 function BuyTab({ M, filters, includePresold }) {
   const [g1, setG1] = useState("model"); // fastest
   const [g2, setG2] = useState("model"); // best profit
@@ -2681,6 +2741,11 @@ function BuyTab({ M, filters, includePresold }) {
     );
 
   const ranking = applyFilters(M.ranking, filters);
+  // buy-signals hierarchy, filtered by the active brand/line chips
+  const buyBrands = (M.buyHierarchy || [])
+    .filter((b) => !filters.brands || filters.brands.has(b.brand))
+    .map((b) => ({ ...b, lines: b.lines.filter((l) => !filters.lines || filters.lines.has(l.line)) }))
+    .filter((b) => b.lines.length > 0);
   const allModels = applyFilters(M.salesByModel, filters);
   const velProf = applyFilters(M.velProfRanking, filters);
 
@@ -2779,13 +2844,12 @@ function BuyTab({ M, filters, includePresold }) {
       {/* Q2 */}
       <QuestionCard num="2" question="What products should I buy?">
         <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-          Scored by: velocity (35%) + avg profit (35%) + sales volume (30%). Out-of-stock items get a boost.
-          Stock health = current stock ÷ weekly sell rate (red &lt; 1 week, yellow &lt; 2 weeks).
-          {" "}{includePresold
-            ? "Presold sales (0–2 days) are included in this ranking."
-            : "Presold sales (0–2 days) are excluded from this ranking — toggle \"Include presold\" in the filter bar to factor them in."}
+          Ranked by <b>buy score</b> = velocity (35%) + avg profit (35%) + sales volume (30%), boosted when out of stock.
+          Brands are ordered by their models' combined buy score. Click a <b>brand</b> to see its product lines, then a line to see models.
+          Each model shows its <b>projected cost</b> (average historical total cost).
+          {" "}{includePresold ? "Presold sales (0–2 days) are included." : "Presold sales (0–2 days) are excluded."}
         </div>
-        <RankTable rows={ranking.slice(0, 20)} nameKey="model" showScore />
+        <BuyHierarchy brands={buyBrands} />
       </QuestionCard>
 
       {/* Fastest 10 */}
