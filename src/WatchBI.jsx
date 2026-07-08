@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
-  BarChart, Bar, LineChart, Line, XAxis, YAxis,
-  CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend,
+  BarChart, Bar, XAxis, YAxis,
+  CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 import {
   Upload, FileSpreadsheet, Boxes, TrendingUp, Sparkles,
@@ -2068,12 +2068,30 @@ function SalesTab({ M, filters }) {
   const fModel = applyFilters(M.salesByModel, filters);
   const allModels = applyFilters(M.salesByModel, filters);
   const [expandedLine, setExpandedLine] = useState(null);
+  const [expandedBrand, setExpandedBrand] = useState(null);
+  const [expandedVelBrand, setExpandedVelBrand] = useState(null);
   const lineTableRef = useRef(null);
   const handleLineBarClick = (data) => {
     const line = data?.payload?.line ?? data?.line;
     if (!line) return;
     setExpandedLine(line);
     lineTableRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+  const modelsForBrand = (brand) => allModels.filter((mo) => (mo.brand || "Unknown") === brand);
+  const brandModelCols = [
+    ["model","Model"],["units","Units"],["profit","Profit $",fmtMoney],
+    ["avgProfit","Avg $",fmtMoney],["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+  ];
+  const renderBrandModels = (r) => {
+    const models = modelsForBrand(r.brand);
+    return models.length === 0
+      ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No model-level data for {r.brand}.</div>
+      : <div>
+          <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+            {r.brand} — by model
+          </div>
+          <ItemTable rows={[...models].sort((a, b) => b.profit - a.profit)} cols={brandModelCols} />
+        </div>;
   };
   const fVelocity = applyFilters(M.byVelocity, filters);
   const [sub, setSub] = useState("performance");
@@ -2104,27 +2122,6 @@ function SalesTab({ M, filters }) {
 
       {/* ════ PERFORMANCE ════ */}
       {sub === "performance" && (<>
-      {/* ── Over time ── */}
-      <Panel title="Sales over time" note="units & profit by month">
-        <ResponsiveContainer width="100%" height={270}>
-          <LineChart data={M.monthly} margin={{ top: 4, right: 16, bottom: 20, left: 0 }}>
-            <CartesianGrid stroke={C.line} vertical={false} />
-            <XAxis dataKey="month" tick={{ fill: C.faint, fontSize: 10 }}
-              angle={M.monthly.length > 12 ? -40 : 0}
-              textAnchor={M.monthly.length > 12 ? "end" : "middle"}
-              interval={M.monthly.length > 24 ? "preserveStartEnd" : 0}
-              height={M.monthly.length > 12 ? 48 : 24} />
-            <YAxis yAxisId="l" tick={{ fill: C.faint, fontSize: 11 }} />
-            <YAxis yAxisId="r" orientation="right" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
-            <Tooltip {...chartTip} formatter={(v, n) => n === "Profit $" ? fmtMoney(v) : v} />
-            <Legend wrapperStyle={{ fontFamily: SANS, fontSize: 12, paddingTop: 8 }}
-              formatter={(val) => <span style={{ color: val === "Units" ? C.gold : C.green }}>{val}</span>} />
-            <Line yAxisId="l" type="monotone" dataKey="units" name="Units" stroke={C.gold} strokeWidth={2} dot={M.monthly.length < 30} />
-            <Line yAxisId="r" type="monotone" dataKey="profit" name="Profit $" stroke={C.green} strokeWidth={2} dot={M.monthly.length < 30} />
-          </LineChart>
-        </ResponsiveContainer>
-      </Panel>
-
       {/* ── By Brand ── */}
       <Panel title="By brand" note={needsBrand ? "needs brand column on sales" : "profit $ and margin %"}>
         {needsBrand
@@ -2139,7 +2136,8 @@ function SalesTab({ M, filters }) {
                     <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
                     <YAxis type="category" dataKey="brand" width={yAxisW(fBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
                     <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
-                    <Bar dataKey="profit" name="Profit" fill={C.green} radius={[0, 4, 4, 0]} />
+                    <Bar dataKey="profit" name="Profit" fill={C.green} radius={[0, 4, 4, 0]} cursor="pointer"
+                      onClick={(d) => { const b = d?.payload?.brand ?? d?.brand; if (b) setExpandedBrand((p) => p === b ? null : b); }} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -2158,10 +2156,16 @@ function SalesTab({ M, filters }) {
               </div>
             </div>
             <div className="mt-3">
-              <ItemTable rows={fBrand} cols={[
-                ["brand","Brand"],["units","Units"],["profit","Profit $",fmtMoney],
-                ["profitPct","Margin %",fmtPct],["medianDays","Median days"],
-              ]} />
+              <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">Click a brand (row or bar) to see its models</div>
+              <ItemTable rows={fBrand}
+                getRowKey={(r) => r.brand}
+                expandedKey={expandedBrand}
+                onRowClick={(r) => setExpandedBrand((p) => p === r.brand ? null : r.brand)}
+                renderExpanded={renderBrandModels}
+                cols={[
+                  ["brand","Brand"],["units","Units"],["profit","Profit $",fmtMoney],
+                  ["profitPct","Margin %",fmtPct],["medianDays","Median days"],
+                ]} />
             </div>
           </>)}
       </Panel>
@@ -2322,7 +2326,8 @@ function SalesTab({ M, filters }) {
                     <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} unit=" d" />
                     <YAxis type="category" dataKey="brand" width={yAxisW(fBrand)} tick={{ fill: C.dim, fontSize: 11 }} />
                     <Tooltip {...chartTip} formatter={(v) => v + " days"} />
-                    <Bar dataKey="medianDays" name="Median days" fill={C.gold} radius={[0, 4, 4, 0]} />
+                    <Bar dataKey="medianDays" name="Median days" fill={C.gold} radius={[0, 4, 4, 0]} cursor="pointer"
+                      onClick={(d) => { const b = d?.payload?.brand ?? d?.brand; if (b) setExpandedVelBrand((p) => p === b ? null : b); }} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -2332,6 +2337,29 @@ function SalesTab({ M, filters }) {
                   ["brand","Brand"],["model","Model"],["medianDays","Days"],["units","Units"],
                 ]} />
               </div>
+            </div>
+            <div className="mt-3">
+              <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">Click a brand (row or bar) to see its models, fastest first</div>
+              <ItemTable rows={[...fBrand].filter(x=>x.medianDays!=null).sort((a,b)=>a.medianDays-b.medianDays)}
+                getRowKey={(r) => r.brand}
+                expandedKey={expandedVelBrand}
+                onRowClick={(r) => setExpandedVelBrand((p) => p === r.brand ? null : r.brand)}
+                renderExpanded={(r) => {
+                  const models = modelsForBrand(r.brand).filter((mo) => mo.medianDays != null).sort((a, b) => a.medianDays - b.medianDays);
+                  return models.length === 0
+                    ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No model velocity data for {r.brand}.</div>
+                    : <div>
+                        <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                          {r.brand} — models by velocity
+                        </div>
+                        <ItemTable rows={models} cols={[
+                          ["model","Model"],["medianDays","Median days"],["units","Units"],["profit","Profit $",fmtMoney],
+                        ]} />
+                      </div>;
+                }}
+                cols={[
+                  ["brand","Brand"],["medianDays","Median days"],["units","Units"],
+                ]} />
             </div>
           </>)}
       </Panel>
