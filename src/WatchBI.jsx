@@ -70,7 +70,9 @@ const FIELDS = {
     ["modelName", "Model name (optional)"], ["modelNumber", "Model / reference # (optional)"],
     ["inventoryType", "Inventory type (optional)"], ["condition", "Condition — New/Used (optional)"],
     ["shippingState", "Shipping state (optional)"], ["supplier", "Supplier / vendor (optional)"],
-    ["salesperson", "Salesperson — created by (optional)"], ["serial", "Serial # (optional)"],
+    ["salesperson", "Salesperson — created by (optional)"],
+    ["amountOwed", "Amount owed / remaining balance (optional)"], ["customer", "Customer name (optional)"],
+    ["serial", "Serial # (optional)"],
   ],
 };
 
@@ -86,6 +88,8 @@ function guessField(role, header) {
   if (has("payment") || has("paid")) return role === "inventory" ? "paymentStatus" : null;
   if (role === "sales") {
     if (has("created by") || has("salesperson") || has("sales person") || has("sold by") || has("sales rep")) return "salesperson";
+    if (has("remaining balance") || has("amount owed") || has("balance due") || h === "balance") return "amountOwed";
+    if (has("customer name") || has("to who") || h === "customer") return "customer";
     if (has("invoice date") || has("sale date") || has("sold date")) return "saleDate";
     if (has("invoice price") || has("sale price") || has("sold price")) return "salePrice";
     if (h === "profit") return "profit";
@@ -582,8 +586,22 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         shippingState: (r[m.shippingState] && String(r[m.shippingState]).trim()) || "Unspecified",
         supplier: (r[m.supplier] && String(r[m.supplier]).trim()) || null,
         salesperson: (r[m.salesperson] && String(r[m.salesperson]).trim()) || null,
+        amountOwed: toNum(r[m.amountOwed]),
+        customer: (r[m.customer] && String(r[m.customer]).trim()) || null,
       };
     });
+    // full mapped set (before the period window) — liabilities reflect all invoices
+    const fullSalesRows = rows;
+
+    // ── overpaid invoices (negative amount owed) — a liability regardless of period ──
+    out.hasAmountOwed = m.amountOwed != null && fullSalesRows.some((x) => x.amountOwed != null);
+    const overpaid = fullSalesRows.filter((x) => x.amountOwed != null && x.amountOwed < 0);
+    out.overpaidItems = overpaid.map((x) => ({
+      customer: x.customer, brand: x.brand, model: x.chartName || x.modelName || x.modelNumber,
+      saleDate: x.saleDate, overage: -x.amountOwed, price: x.price,
+    })).sort((a, b) => b.overage - a.overage);
+    out.overpaidLiability = overpaid.reduce((s, x) => s + (-x.amountOwed), 0);
+    out.overpaidCount = overpaid.length;
     // drop excluded models from every sales total
     if (hasExcl) rows = rows.filter((x) => !excludedModels.has(x.modelKey));
 
@@ -695,9 +713,9 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         medianMargin: median(b._m),
       }));
 
-    // ── sales tax by shipping state (respects the active sales period) ──
+    // ── sales tax by shipping state — a liability, so ALL invoices (ignores the period) ──
     const bst = {};
-    allSalesRows.forEach((x) => {
+    fullSalesRows.forEach((x) => {
       const st = x.shippingState || "Unspecified";
       bst[st] = bst[st] || { state: st, units: 0, revenue: 0 };
       bst[st].units++; bst[st].revenue += x.price;
@@ -721,7 +739,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       .sort((a, b) => b.tax - a.tax || b.revenue - a.revenue)
       .slice(0, 4);
     out.salesTaxTotal = taxed.reduce((s, x) => s + x.tax, 0);
-    out.hasShippingState = allSalesRows.some((x) => x.shippingState && x.shippingState !== "Unspecified");
+    out.hasShippingState = fullSalesRows.some((x) => x.shippingState && x.shippingState !== "Unspecified");
 
     // supplier ("purchased from") spend + profit, from sales rows
     out._salSupplierAgg = {};
@@ -1479,6 +1497,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
     M.hasInv && ["inventory", "Inventory", Boxes],
     M.hasSales && ["sales", "Sales", TrendingUp],
     M.hasSales && ["buy", "Buy Signals", Sparkles],
+    (M.hasInv || M.hasSales) && ["liabilities", "Liabilities", AlertTriangle],
   ].filter(Boolean);
 
   // filters shared across Inventory / Sales / Buy tabs
@@ -1663,6 +1682,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
         {tab === "inventory" && <InventoryTab M={M} filters={filters} />}
         {tab === "sales" && <SalesTab M={M} filters={filters} />}
         {tab === "buy" && <BuyTab M={M} filters={filters} includePresold={includePresold} />}
+        {tab === "liabilities" && <LiabilitiesTab M={M} />}
       </div>
     </div>
   );
@@ -1717,6 +1737,111 @@ const WATCH_COLS = [
   ["age","Days in stock"],["cost","Cost",fmtMoney],
 ];
 
+/* ---------- Liabilities (financial exposure — ignores brand/period filters) ---------- */
+function LiabilitiesTab({ M }) {
+  const fmtDate = (d) => d ? new Date(d).toISOString().slice(0, 10) : "--";
+  return (
+    <div className="flex flex-col gap-5">
+      <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+        These reflect real financial exposure across the full data set and are not affected by the brand, status, or period filters.
+      </div>
+
+      {/* KPI row */}
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))" }}>
+        {M.hasInv && <Stat label="Unpaid inventory" value={fmtMoney(M.unpaidLiability)} sub={`${M.unpaidCount} watches · excl. memo & voided`} />}
+        {M.hasInv && <Stat label="Consignment" value={fmtMoney(M.consignmentLiability)} sub={`${M.consignmentCount} unsold`} />}
+        {M.hasSales && <Stat label="Overpaid invoices" value={fmtMoney(M.overpaidLiability)} sub={`${M.overpaidCount} invoices owed back`} />}
+        {M.hasSales && <Stat label="Sales tax (est.)" value={fmtMoney(M.salesTaxTotal)} sub="4 ruled states" />}
+      </div>
+
+      {/* Unpaid inventory */}
+      {M.hasInv && (
+        <Panel title="Unpaid inventory liability" note="unpaid watches, excluding memo & voided">
+          {!M.hasPaymentStatus
+            ? <Locked msg="Add a 'Payment status' column (Paid / Unpaid / Voided) to your inventory export to track this." />
+            : M.unpaidItems.length === 0
+            ? <div style={{ color: C.green, fontFamily: SANS, fontSize: 13 }}>✓ No unpaid watches. Nothing owed.</div>
+            : (<>
+                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.unpaidLiability)} owed</div>
+                <ItemTable rows={M.unpaidItems} cols={[
+                  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+                  ["invTypeLabel","Type"],["cost","Cost owed",fmtMoney],
+                ]} />
+              </>)}
+        </Panel>
+      )}
+
+      {/* Consignment */}
+      {M.hasInv && (
+        <Panel title="Consignment liability" note="unsold consignment inventory">
+          {!M.hasInvType
+            ? <Locked msg="Add an 'Inventory type' column (Owned / Consignment / Memo) to your inventory export to track this." />
+            : M.consignmentItems.length === 0
+            ? <div style={{ color: C.dim, fontFamily: SANS, fontSize: 13 }}>No consignment inventory on hand.</div>
+            : (<>
+                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.consignmentLiability)} in consignment stock</div>
+                <ItemTable rows={M.consignmentItems} cols={[
+                  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
+                  ["age","Days in stock"],["cost","Cost",fmtMoney],
+                ]} />
+              </>)}
+        </Panel>
+      )}
+
+      {/* Overpaid invoices */}
+      {M.hasSales && (
+        <Panel title="Overpaid invoices" note="invoices with a negative amount owed (overpayment / trade-in over balance)">
+          {!M.hasAmountOwed
+            ? <Locked msg="Add a 'Remaining balance' / 'Amount owed' column to your sales export to track overpayments." />
+            : M.overpaidItems.length === 0
+            ? <div style={{ color: C.green, fontFamily: SANS, fontSize: 13 }}>✓ No overpaid invoices.</div>
+            : (<>
+                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.overpaidLiability)} owed back to customers</div>
+                <ItemTable rows={M.overpaidItems} cols={[
+                  ["customer","Customer"],["brand","Brand"],["model","Model"],
+                  ["saleDate","Invoice date",fmtDate],["overage","Overpaid",fmtMoney],
+                ]} />
+              </>)}
+        </Panel>
+      )}
+
+      {/* Sales tax */}
+      {M.hasSales && (
+        <Panel title="Sales tax by state" note="estimated · states with a tax rule">
+          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+            Estimated sales tax owed per shipping state. Tax applies to state sales above each state's threshold:
+            New York 8% over $500k · California 9.5% over $500k · Florida 7% over $100k · Georgia 7% over $100k.
+          </div>
+          {!M.hasShippingState && (
+            <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+              No shipping-state column detected. Map a "Shipping state" column on your sales export to break this down.
+            </div>
+          )}
+          <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.salesTaxTotal)} estimated tax owed</div>
+          <ResponsiveContainer width="100%" height={barH(M.salesTaxByState.length, 34, 140)}>
+            <BarChart data={M.salesTaxByState} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+              <CartesianGrid stroke={C.line} horizontal={false} />
+              <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
+              <YAxis type="category" dataKey="state" width={yAxisW(M.salesTaxByState, "state", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
+              <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
+              <Bar dataKey="tax" name="Tax owed" fill={C.gold} radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+          <div className="mt-3">
+            <ItemTable rows={M.salesTaxByState} cols={[
+              ["state","State"],
+              ["taxRate","Rate",(v) => v == null ? "—" : (v * 100).toFixed(1) + "%"],
+              ["revenue","Total sales",fmtMoney],
+              ["taxableBase","Taxable base",fmtMoney],
+              ["tax","Tax owed",fmtMoney],
+            ]} />
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 function InventoryTab({ M, filters }) {
   const [sub, setSub] = useState("overview");
   const fByBrand = applyFilters(M.invByBrand, filters);
@@ -1745,7 +1870,6 @@ function InventoryTab({ M, filters }) {
     ["overview", "Overview"],
     ["grading", "Grading & Aging"],
     ["quality", "Data Quality"],
-    ["liabilities", "Liabilities"],
     ["suppliers", "Suppliers"],
     ["projections", "Projections"],
   ];
@@ -1958,49 +2082,6 @@ function InventoryTab({ M, filters }) {
         </Panel>
       )}
 
-      {/* ════ LIABILITIES ════ */}
-      {sub === "liabilities" && (<>
-        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
-          Liabilities reflect the full inventory file and are not affected by the brand/status filters above.
-        </div>
-        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
-          <Stat label="Unpaid liability" value={fmtMoney(M.unpaidLiability)} sub={`${M.unpaidCount} watches · excl. memo & voided`} />
-          <Stat label="Consignment liability" value={fmtMoney(M.consignmentLiability)} sub={`${M.consignmentCount} unsold consignment`} />
-        </div>
-
-        <Panel title="Unpaid inventory liability" note="unpaid watches, excluding memo & voided">
-          {!M.hasPaymentStatus
-            ? <Locked msg="Add a 'Payment status' column (Paid / Unpaid / Voided) to your inventory export to track this." />
-            : M.unpaidItems.length === 0
-            ? <div style={{ color: C.green, fontFamily: SANS, fontSize: 13 }}>✓ No unpaid watches. Nothing owed.</div>
-            : (<>
-                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.unpaidLiability)} owed</div>
-                <ItemTable rows={M.unpaidItems} cols={[
-                  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
-                  ["invTypeLabel","Type"],["cost","Cost owed",fmtMoney],
-                ]} />
-              </>)}
-        </Panel>
-
-        <Panel title="Consignment liability" note="unsold consignment inventory">
-          {!M.hasInvType
-            ? <Locked msg="Add an 'Inventory type' column (Owned / Consignment / Memo) to your inventory export to track this." />
-            : M.consignmentItems.length === 0
-            ? <div style={{ color: C.dim, fontFamily: SANS, fontSize: 13 }}>No consignment inventory on hand.</div>
-            : (<>
-                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.consignmentLiability)} in consignment stock</div>
-                <ItemTable rows={M.consignmentItems} cols={[
-                  ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
-                  ["age","Days in stock"],["cost","Cost",fmtMoney],
-                ]} />
-              </>)}
-        </Panel>
-
-        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
-          Sales tax potential liability (by shipping state) lives under the <span style={{ color: C.gold }}>Sales → Tax</span> tab.
-        </div>
-      </>)}
-
       {/* ════ SUPPLIERS ════ */}
       {sub === "suppliers" && (
         <Panel title="Top suppliers" note={M.hasSupplier ? "by spend & by profit" : "needs a 'purchased from' / supplier column"}>
@@ -2099,7 +2180,6 @@ function SalesTab({ M, filters }) {
     ["performance", "Performance"],
     ["breakdowns", "Breakdowns"],
     ["salespeople", "Salespeople"],
-    ["tax", "Tax"],
   ];
   return (
     <div className="flex flex-col gap-5">
@@ -2403,40 +2483,6 @@ function SalesTab({ M, filters }) {
 
       </>)}
 
-      {/* ════ TAX ════ */}
-      {sub === "tax" && (
-        <Panel title="Sales tax by state" note={M.windowMode === "window" ? `states with a tax rule · last ${M.salesWindowDays} days` : "states with a tax rule · all sales"}>
-          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-            Estimated sales tax owed per shipping state, over the {M.windowMode === "window" ? `last ${M.salesWindowDays} days of sales` : "full sales history"}. Tax applies to state sales
-            above each state's threshold: New York 8% over $500k · California 9.5% over $500k · Florida 7% over $100k · Georgia 7% over $100k.
-            States without a rule collect no tax, so only the four ruled states are shown.
-          </div>
-          {!M.hasShippingState && (
-            <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-              No shipping-state column detected. Map a "Shipping state" column on your sales export to break this down.
-            </div>
-          )}
-          <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.salesTaxTotal)} estimated tax owed</div>
-          <ResponsiveContainer width="100%" height={barH(M.salesTaxByState.length, 34, 140)}>
-            <BarChart data={M.salesTaxByState} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
-              <CartesianGrid stroke={C.line} horizontal={false} />
-              <XAxis type="number" tick={{ fill: C.faint, fontSize: 11 }} tickFormatter={fmtK} />
-              <YAxis type="category" dataKey="state" width={yAxisW(M.salesTaxByState, "state", 90)} tick={{ fill: C.dim, fontSize: 11 }} />
-              <Tooltip {...chartTip} formatter={(v) => fmtMoney(v)} />
-              <Bar dataKey="tax" name="Tax owed" fill={C.gold} radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-          <div className="mt-3">
-            <ItemTable rows={M.salesTaxByState} cols={[
-              ["state","State"],
-              ["taxRate","Rate",(v) => v == null ? "—" : (v * 100).toFixed(1) + "%"],
-              ["revenue","Total sales",fmtMoney],
-              ["taxableBase","Taxable base",fmtMoney],
-              ["tax","Tax owed",fmtMoney],
-            ]} />
-          </div>
-        </Panel>
-      )}
     </div>
   );
 }
