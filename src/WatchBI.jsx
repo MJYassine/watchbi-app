@@ -256,6 +256,26 @@ function ageGrade(age) {
 }
 const GRADE_RANK = { A: 0, B: 1, C: 2, D: 3, F: 4 };
 
+/* market-value grades vs WatchCharts median asking price (A best) */
+// how well you SOLD: sale price as % of market. higher = better.
+function salesGrade(price, market) {
+  if (!market || price == null) return null;
+  const pct = (price / market) * 100;
+  if (pct >= 100) return "A"; if (pct >= 95) return "B"; if (pct >= 90) return "C"; return "D";
+}
+// Quality of Cost: what you PAID as % of market. lower = better.
+function qocGrade(cost, market) {
+  if (!market || !cost) return null;
+  const pct = (cost / market) * 100;
+  if (pct >= 100) return "D"; if (pct >= 95) return "C"; if (pct >= 90) return "B"; return "A";
+}
+// Quality of Target: your target price vs market. A = priced near market, then wider bands.
+function qotGrade(target, market) {
+  if (!market || !target || target <= 0) return null;
+  const d = Math.abs((target / market) * 100 - 100);
+  if (d <= 3) return "A"; if (d <= 8) return "B"; if (d <= 15) return "C"; return "D";
+}
+
 function normalizeBrand(b) {
   if (!b) return null;
   let s = String(b).trim().toLowerCase();
@@ -467,6 +487,16 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       .sort((a, b) => (GRADE_RANK[b.grade] - GRADE_RANK[a.grade]) || (b.cost - a.cost));
     out.needToSell = out.needToSellRanked.slice(0, 10);
 
+    // ── oldest 20 watches in stock (for market-value QoC / QoT grading) ──
+    out.oldest20 = [...filteredItems]
+      .filter((x) => x.age != null)
+      .sort((a, b) => b.age - a.age)
+      .slice(0, 20)
+      .map((x) => ({
+        brand: x.brand, model: x.chartName || x.modelName, reference: x.modelNumber,
+        age: x.age, grade: x.grade, cost: x.cost, targetWholesale: x.targetWholesale,
+      }));
+
     // ── data quality: how many items are missing each key field ──
     const dqDefs = [
       { key: "status", label: "Inventory status", missing: (x) => !x.status },
@@ -610,6 +640,16 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     });
     // full mapped set (before the period window) — liabilities reflect all invoices
     const fullSalesRows = rows;
+
+    // ── latest 20 sales (for market-value sales grading) ──
+    out.latest20 = [...fullSalesRows]
+      .filter((x) => x.saleDate)
+      .sort((a, b) => b.saleDate - a.saleDate)
+      .slice(0, 20)
+      .map((x) => ({
+        brand: x.brand, model: x.chartName || x.modelName, reference: x.modelNumber,
+        saleDate: x.saleDate, price: x.price, cost: x.cost, profit: x.profit,
+      }));
 
     // all-time historical aggregates by model & brand (for projected-vs-historical health)
     const histModel = {}, histBrand = {};
@@ -1815,6 +1855,84 @@ const WATCH_COLS = [
   ["age","Days in stock"],["cost","Cost",fmtMoney],
 ];
 
+/* fetch WatchCharts median asking price for a set of {brand, reference} rows.
+   Server-side cached, so repeated views don't re-spend data credits. */
+function useMarketValues(rows) {
+  const [map, setMap] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  const valid = (rows || []).filter((r) => r.brand && r.reference);
+  const depKey = valid.map((r) => r.brand + "|" + r.reference).join(",");
+  useEffect(() => {
+    if (!valid.length) { setMap({}); return; }
+    let cancelled = false;
+    setLoading(true); setErr(null);
+    fetch("/api/market", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: valid.map((r) => ({ brand: r.brand, reference: r.reference })) }),
+    })
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) { if (d.error) setErr(d.error); else setMap(d.results || {}); } })
+      .catch(() => { if (!cancelled) setErr("Couldn't reach market data."); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [depKey]);
+  const lookup = (brand, reference) =>
+    map[String(brand || "").toLowerCase().trim() + "|" + String(reference || "").toLowerCase().trim()] || null;
+  return { lookup, loading, err };
+}
+
+function MarketStatus({ loading, err }) {
+  if (err) return <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginBottom: 8 }}>Market data unavailable: {err}</div>;
+  if (loading) return <div style={{ color: C.gold, fontFamily: SANS, fontSize: 12, marginBottom: 8 }}>Loading WatchCharts market values…</div>;
+  return null;
+}
+
+/* Oldest 20 in stock — target & cost vs market, with QoC + QoT grades */
+function OldestMarketTable({ rows }) {
+  const { lookup, loading, err } = useMarketValues(rows);
+  const graded = rows.map((r) => {
+    const mv = lookup(r.brand, r.reference);
+    const m = mv?.medianAsking ?? null;
+    return { ...r, median: m, qoc: qocGrade(r.cost, m), qot: qotGrade(r.targetWholesale, m) };
+  });
+  return (
+    <>
+      <MarketStatus loading={loading} err={err} />
+      <ItemTable rows={graded} cols={[
+        ["brand","Brand"],["model","Model"],["reference","Ref #"],["age","Days in stock"],
+        ["cost","Cost",fmtMoney],["targetWholesale","Target",(v) => v ? fmtMoney(v) : "—"],
+        ["median","Median asking",(v) => v ? fmtMoney(v) : "—"],
+        ["qoc","QoC",(v) => <GradeBadge grade={v} />],
+        ["qot","QoT",(v) => <GradeBadge grade={v} />],
+      ]} />
+    </>
+  );
+}
+
+/* Latest 20 sales — actual sale price vs market, with a sales grade */
+function LatestMarketTable({ rows }) {
+  const { lookup, loading, err } = useMarketValues(rows);
+  const fmtDate = (d) => d ? new Date(d).toISOString().slice(0, 10) : "—";
+  const graded = rows.map((r) => {
+    const mv = lookup(r.brand, r.reference);
+    const m = mv?.medianAsking ?? null;
+    return { ...r, median: m, salesGrade: salesGrade(r.price, m), pctOfMarket: m ? (r.price / m) * 100 : null };
+  });
+  return (
+    <>
+      <MarketStatus loading={loading} err={err} />
+      <ItemTable rows={graded} cols={[
+        ["saleDate","Date",fmtDate],["brand","Brand"],["model","Model"],["reference","Ref #"],
+        ["price","Sold for",fmtMoney],
+        ["median","Median asking",(v) => v ? fmtMoney(v) : "—"],
+        ["pctOfMarket","% of market",(v) => v == null ? "—" : v.toFixed(0) + "%"],
+        ["salesGrade","Grade",(v) => <GradeBadge grade={v} />],
+      ]} />
+    </>
+  );
+}
+
 /* ---------- Liabilities (financial exposure — ignores brand/period filters) ---------- */
 function LiabilitiesTab({ M }) {
   const fmtDate = (d) => d ? new Date(d).toISOString().slice(0, 10) : "--";
@@ -1948,6 +2066,7 @@ function InventoryTab({ M, filters }) {
   const subTabs = [
     ["overview", "Overview"],
     ["grading", "Grading & Aging"],
+    ["market", "Market Grades"],
     ["quality", "Data Quality"],
     ["suppliers", "Suppliers"],
     ["projections", "Projections"],
@@ -2161,6 +2280,20 @@ function InventoryTab({ M, filters }) {
         </Panel>
       )}
 
+      {/* ════ MARKET GRADES ════ */}
+      {sub === "market" && (
+        <Panel title="Oldest 20 in stock — vs WatchCharts market" note="target & cost graded against median asking price">
+          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+            Your 20 longest-held watches, compared to WatchCharts' <b>median asking price</b>.
+            <b> QoC</b> (Quality of Cost) grades what you paid vs market — A = paid under 90% of market, D = paid 100%+.
+            <b> QoT</b> (Quality of Target) grades how close your target price is to market — A = within 3%, down to D = off by more than 15%.
+          </div>
+          {(M.oldest20 || []).length === 0
+            ? <Locked msg="No inventory with age data to grade." />
+            : <OldestMarketTable rows={M.oldest20} />}
+        </Panel>
+      )}
+
       {/* ════ SUPPLIERS ════ */}
       {sub === "suppliers" && (
         <Panel title="Top suppliers" note={M.hasSupplier ? "by spend & by profit" : "needs a 'purchased from' / supplier column"}>
@@ -2284,6 +2417,7 @@ function SalesTab({ M, filters }) {
     ["performance", "Performance"],
     ["breakdowns", "Breakdowns"],
     ["salespeople", "Salespeople"],
+    ["market", "Market Grades"],
   ];
   return (
     <div className="flex flex-col gap-5">
@@ -2586,6 +2720,19 @@ function SalesTab({ M, filters }) {
       </Panel>
 
       </>)}
+
+      {/* ════ MARKET GRADES ════ */}
+      {sub === "market" && (
+        <Panel title="Latest 20 sales — vs WatchCharts market" note="actual sale price graded against median asking price">
+          <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
+            Your 20 most recent sales, compared to WatchCharts' <b>median asking price</b>.
+            Sales grade: <b>A</b> = sold at 100%+ of market, <b>B</b> = 95%+, <b>C</b> = 90%+, <b>D</b> = below.
+          </div>
+          {(M.latest20 || []).length === 0
+            ? <Locked msg="No dated sales to grade." />
+            : <LatestMarketTable rows={M.latest20} />}
+        </Panel>
+      )}
 
     </div>
   );
