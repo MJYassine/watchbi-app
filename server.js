@@ -57,10 +57,14 @@ async function fetchFileRows(drive, file) {
   return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null });
 }
 
+const _msgCache = {}; // days -> { at, payload }
+const MSG_TTL = 30 * 60 * 1000; // 30 min — the folder updates once a day
 app.get("/api/messages", async (req, res) => {
   const drive = getDrive();
   if (!drive || !DRIVE_FOLDER_ID) return res.status(500).json({ error: "Google Drive not configured" });
   const days = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 5));
+  const cached = _msgCache[days];
+  if (cached && Date.now() - cached.at < MSG_TTL && !req.query.force) return res.json(cached.payload);
   try {
     let files = [], token;
     do {
@@ -89,7 +93,9 @@ app.get("/api/messages", async (req, res) => {
         });
       } catch { /* skip a bad file */ }
     }
-    res.json({ rows, files: recent.map((f) => f.name), latest, days });
+    const payload = { rows, files: recent.map((f) => f.name), latest, days };
+    _msgCache[days] = { at: Date.now(), payload };
+    res.json(payload);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
