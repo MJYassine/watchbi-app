@@ -15,20 +15,28 @@ app.use(express.json({ limit: "1mb" }));
 
 /* ---------- Google Drive: pull recent WhatsApp message sheets ---------- */
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+// returns { creds } or { error } so the endpoint can report exactly what's wrong
 function driveCreds() {
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    try { return { creds: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON) }; }
+    catch (e) { return { error: "GOOGLE_SERVICE_ACCOUNT_JSON is set but is not valid JSON — re-paste the whole key file" }; }
+  }
   const p = path.join(__dirname, "service-account.json");
-  if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
-  return null;
+  if (fs.existsSync(p)) {
+    try { return { creds: JSON.parse(fs.readFileSync(p, "utf8")) }; }
+    catch (e) { return { error: "service-account.json is not valid JSON" }; }
+  }
+  return { error: "No credentials — set the GOOGLE_SERVICE_ACCOUNT_JSON env var (paste the whole key file)" };
 }
 let _drive = null;
 function getDrive() {
-  if (_drive) return _drive;
-  const creds = driveCreds();
-  if (!creds) return null;
-  const auth = new google.auth.GoogleAuth({ credentials: creds, scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
+  if (_drive) return { drive: _drive };
+  if (!DRIVE_FOLDER_ID) return { error: "GOOGLE_DRIVE_FOLDER_ID env var is not set" };
+  const c = driveCreds();
+  if (c.error) return { error: c.error };
+  const auth = new google.auth.GoogleAuth({ credentials: c.creds, scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
   _drive = google.drive({ version: "v3", auth });
-  return _drive;
+  return { drive: _drive };
 }
 // map a raw message row (varied schemas) to canonical fields the dashboard reads
 function normalizeMsgRow(r) {
@@ -60,8 +68,9 @@ async function fetchFileRows(drive, file) {
 const _msgCache = {}; // days -> { at, payload }
 const MSG_TTL = 30 * 60 * 1000; // 30 min — the folder updates once a day
 app.get("/api/messages", async (req, res) => {
-  const drive = getDrive();
-  if (!drive || !DRIVE_FOLDER_ID) return res.status(500).json({ error: "Google Drive not configured" });
+  const g = getDrive();
+  if (g.error) return res.status(500).json({ error: g.error });
+  const drive = g.drive;
   const days = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 5));
   const cached = _msgCache[days];
   if (cached && Date.now() - cached.at < MSG_TTL && !req.query.force) return res.json(cached.payload);
