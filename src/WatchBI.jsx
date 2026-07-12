@@ -5,7 +5,7 @@ import {
 } from "recharts";
 import {
   Upload, FileSpreadsheet, Boxes, TrendingUp, Sparkles,
-  Check, X, AlertTriangle, Lock, Watch, Trash2, ArrowRight,
+  Check, X, AlertTriangle, Lock, Watch, Trash2, ArrowRight, Bell,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
@@ -74,12 +74,28 @@ const FIELDS = {
     ["amountOwed", "Amount owed / remaining balance (optional)"], ["customer", "Customer name (optional)"],
     ["serial", "Serial # (optional)"],
   ],
+  messages: [
+    ["intent", "Intent (buy/sell)"], ["brand", "Brand"], ["model", "Model / reference"],
+    ["price", "Price"], ["messageBody", "Message text"], ["timestamp", "Timestamp"],
+    ["sender", "Sender"], ["chat", "Chat / group"],
+  ],
 };
 
 /* ---- header auto-detect ---- */
 function guessField(role, header) {
   const h = String(header).trim().toLowerCase();
   const has = (s) => h.includes(s);
+  if (role === "messages") {
+    if (h === "intent") return "intent";
+    if (h === "messagebody" || has("message body") || h === "body") return "messageBody";
+    if (h === "timestamp" || h === "date" || has("time")) return "timestamp";
+    if (h === "sendername" || has("sender")) return "sender";
+    if (h === "chatname" || has("chat") || has("group")) return "chat";
+    if (h === "price") return "price";
+    if (h === "model") return "model";
+    if (h === "brand") return "brand";
+    return null;
+  }
   if (has("brand")) return "brand";
   if (has("model name") || has("title item")) return "modelName";
   if (has("model number") || has("reference") || h === "ref") return "modelNumber";
@@ -121,6 +137,7 @@ function autoMap(role, columns) {
 function guessRole(columns) {
   const lower = columns.map((c) => String(c).toLowerCase());
   const any = (s) => lower.some((c) => c.includes(s));
+  if (any("intent") && (any("messagebody") || any("messageid") || any("chatname"))) return "messages";
   if (any("invoice date") || any("invoice price") || any("sale date")) return "sales";
   if (any("brand") || any("wholesale") || any("inventory status") || any("model number"))
     return "inventory";
@@ -356,6 +373,13 @@ const median = (arr) => {
   const m = Math.floor(a.length / 2);
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 };
+const pctile = (arr, p) => {
+  const a = arr.filter((x) => x != null).sort((x, y) => x - y);
+  if (!a.length) return null;
+  return a[Math.min(a.length - 1, Math.floor((p / 100) * a.length))];
+};
+/* normalize a reference number for matching (uppercase, strip punctuation except . and /) */
+const normRef = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9./]/g, "").trim();
 
 /* =========================================================================
    METRICS ENGINE
@@ -547,6 +571,17 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     out._invModelAgg = invModel;
     out._invBrandAgg = invBrand;
 
+    // per-reference inventory position (stock + cost history) for the Alerts engine
+    const refInv = {};
+    filteredItems.forEach((x) => {
+      const rf = normRef(x.modelNumber);
+      if (!rf) return;
+      refInv[rf] = refInv[rf] || { stock: 0, costs: [], brand: x.brand, model: x.chartName || x.modelName };
+      refInv[rf].stock++;
+      if (x.cost) refInv[rf].costs.push(x.cost);
+    });
+    out._refInv = refInv;
+
     // supplier ("purchased from") spend, from inventory purchase cost
     out._invSupplierAgg = {};
     filteredItems.forEach((x) => {
@@ -731,6 +766,19 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       const span = (Math.max(...ds) - Math.min(...ds)) / (7 * 86400000);
       return Math.max(span, 1);
     })();
+
+    // per-reference sales position for the Alerts engine: all-time cost & sale-price
+    // history, plus recent (windowed) units for a velocity / weeks-of-stock estimate
+    const refSal = {};
+    fullSalesRows.forEach((x) => {
+      const rf = normRef(x.modelNumber);
+      if (!rf) return;
+      refSal[rf] = refSal[rf] || { costs: [], sales: [], recent: 0, brand: x.brand, model: x.chartName || x.modelName };
+      if (x.cost) refSal[rf].costs.push(x.cost);
+      if (x.price) refSal[rf].sales.push(x.price);
+    });
+    rows.forEach((x) => { const rf = normRef(x.modelNumber); if (rf && refSal[rf]) refSal[rf].recent++; });
+    out._refSal = refSal;
 
     // monthly
     const mo = {};
@@ -1002,6 +1050,56 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
   out.projVsHistBrands = joinProjHist(out._invBrandAgg, out._histBrandAgg);
   out.hasProjVsHist = (out.projVsHistModels.length > 0) && (out.hasInv && out.hasSales);
   delete out._invModelAgg; delete out._invBrandAgg; delete out._histModelAgg; delete out._histBrandAgg;
+
+  // ── reference positions (for the Alerts engine): merge inventory + sales by ref ──
+  const refPos = {};
+  const seed = (rf, o) => {
+    refPos[rf] = refPos[rf] || { ref: rf, stock: 0, costs: [], sales: [], recent: 0, brand: null, model: null };
+    if (o.brand && !refPos[rf].brand) refPos[rf].brand = o.brand;
+    if (o.model && !refPos[rf].model) refPos[rf].model = o.model;
+    return refPos[rf];
+  };
+  Object.entries(out._refInv || {}).forEach(([rf, v]) => { const p = seed(rf, v); p.stock += v.stock; p.costs.push(...v.costs); });
+  Object.entries(out._refSal || {}).forEach(([rf, v]) => { const p = seed(rf, v); p.costs.push(...v.costs); p.sales.push(...v.sales); p.recent += v.recent; });
+  const wks = out.salesWeeks || (45 / 7);
+  out.refPositions = {};
+  for (const rf in refPos) {
+    const p = refPos[rf];
+    const wv = p.recent / wks;
+    out.refPositions[rf] = {
+      ref: rf, brand: p.brand, model: p.model, stock: p.stock,
+      weeklyVelocity: +wv.toFixed(2),
+      weeksOfStock: wv > 0 ? +(p.stock / wv).toFixed(1) : null,
+      medianCost: median(p.costs), loCost: pctile(p.costs, 10), hiCost: pctile(p.costs, 90),
+      maxCost: p.costs.length ? Math.max(...p.costs) : null,
+      medianSale: median(p.sales),
+    };
+  }
+  delete out._refInv; delete out._refSal;
+
+  // ── WhatsApp dealer-group messages (buy/sell intents) for the Alerts engine ──
+  // supports several daily files dropped together
+  const msgSets = datasets.filter((d) => d.role === "messages");
+  const parsed = [];
+  msgSets.forEach((msg) => {
+    const mm = msg.mapping;
+    msg.rows.forEach((r) => {
+      const intent = String(r[mm.intent] || "").toLowerCase().trim();
+      if (intent !== "buy" && intent !== "sell") return;
+      const rawModel = r[mm.model], rawBrand = r[mm.brand];
+      const ref = normRef(rawModel) || normRef(rawBrand);
+      if (!ref || ref.length < 4) return;
+      parsed.push({
+        intent, price: toNum(r[mm.price]), ts: toDate(r[mm.timestamp]),
+        body: r[mm.messageBody] || null, sender: r[mm.sender] || null, chat: r[mm.chat] || null,
+        ref, rawModel: rawModel || rawBrand || null,
+      });
+    });
+  });
+  out.messages = parsed;
+  out.hasMessages = parsed.length > 0;
+  const ts = parsed.map((x) => x.ts).filter(Boolean).map((d) => d.getTime());
+  out.messagesMax = ts.length ? new Date(Math.max(...ts)) : null;
 
   return out;
 }
@@ -1558,7 +1656,7 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
                 <span style={{ color: C.faint }} className="text-xs">· {d.sheetName} · {d.rows.length} rows</span>
               </div>
               <div className="flex items-center gap-2">
-                {["inventory", "sales", "ignore"].map((r) => (
+                {["inventory", "sales", "messages", "ignore"].map((r) => (
                   <button key={r} onClick={() => setRole(d.id, r)}
                     style={{
                       fontFamily: SANS, borderRadius: 8,
@@ -1616,6 +1714,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
     M.hasSales && ["sales", "Sales", TrendingUp],
     M.hasSales && ["buy", "Buy Signals", Sparkles],
     (M.hasInv || M.hasSales) && ["liabilities", "Liabilities", AlertTriangle],
+    M.hasMessages && ["alerts", "Alerts", Bell],
   ].filter(Boolean);
 
   // filters shared across Inventory / Sales / Buy tabs
@@ -1801,6 +1900,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
         {tab === "sales" && <SalesTab M={M} filters={filters} />}
         {tab === "buy" && <BuyTab M={M} filters={filters} includePresold={includePresold} />}
         {tab === "liabilities" && <LiabilitiesTab M={M} />}
+        {tab === "alerts" && <AlertsTab M={M} />}
       </div>
     </div>
   );
@@ -1930,6 +2030,120 @@ function LatestMarketTable({ rows }) {
         ["salesGrade","Grade",(v) => <GradeBadge grade={v} />],
       ]} />
     </>
+  );
+}
+
+/* ---------- Alerts: buy/sell signals from WhatsApp dealer-group messages ---------- */
+function AlertsTab({ M }) {
+  const [windowDays, setWindowDays] = useState(3);
+  const [costTol, setCostTol] = useState(10);   // % above your median cost still "in range"
+  const [lowStockOnly, setLowStockOnly] = useState(false);
+  const [sellBand, setSellBand] = useState(15); // % under your median sale still worth a sell alert
+
+  const anchor = M.messagesMax ? M.messagesMax.getTime() : Date.now();
+  const startT = anchor - windowDays * 86400000;
+  const pos = M.refPositions || {};
+
+  const inWindow = (M.messages || []).filter((m) => m.ts && m.ts.getTime() >= startT);
+
+  // BUY alerts: someone is selling (intent="sell") a ref we trade, priced in our cost range
+  const buySeen = new Set();
+  const buyAlerts = [];
+  inWindow.forEach((m) => {
+    if (m.intent !== "sell" || !m.price) return;
+    const p = pos[m.ref]; if (!p || !p.medianCost) return;
+    if (m.price > p.medianCost * 3) return;                       // drop mis-parsed / mismatched prices
+    if (m.price > p.medianCost * (1 + costTol / 100)) return;     // out of your buy range
+    const low = p.weeksOfStock != null && p.weeksOfStock < 1;
+    if (lowStockOnly && !low) return;
+    const dk = m.ref + "|" + Math.round(m.price);
+    if (buySeen.has(dk)) return; buySeen.add(dk);
+    buyAlerts.push({
+      grade: qocGrade(m.price, p.medianCost), ref: m.ref, brand: p.brand, model: p.model,
+      price: m.price, medianCost: p.medianCost, loCost: p.loCost, hiCost: p.hiCost,
+      stock: p.stock, low, sender: m.sender, chat: m.chat, body: m.body, ts: m.ts,
+    });
+  });
+  const gradeOrder = { A: 0, B: 1, C: 2, D: 3, null: 4 };
+  buyAlerts.sort((a, b) => (b.low - a.low) || (gradeOrder[a.grade] - gradeOrder[b.grade]) || (b.ts - a.ts));
+
+  // SELL alerts: someone wants to buy (intent="buy" / WTB) a ref we hold
+  const sellSeen = new Set();
+  const sellAlerts = [];
+  inWindow.forEach((m) => {
+    if (m.intent !== "buy") return;
+    const p = pos[m.ref]; if (!p || !p.stock) return;
+    if (m.price && p.medianCost && m.price > (p.medianSale || p.medianCost) * 4) return; // drop garbage prices
+    const dk = m.ref + "|" + (m.sender || "") + "|" + (m.price || "");
+    if (sellSeen.has(dk)) return; sellSeen.add(dk);
+    const grade = (m.price && p.medianSale) ? salesGrade(m.price, p.medianSale) : null;
+    sellAlerts.push({
+      grade, ref: m.ref, brand: p.brand, model: p.model, price: m.price || null,
+      medianSale: p.medianSale, stock: p.stock, sender: m.sender, chat: m.chat, body: m.body, ts: m.ts,
+    });
+  });
+  sellAlerts.sort((a, b) => ((b.price ? 1 : 0) - (a.price ? 1 : 0)) || (gradeOrder[a.grade] - gradeOrder[b.grade]) || (b.ts - a.ts));
+
+  const fmtWhen = (d) => d ? new Date(d).toISOString().slice(0, 10) : "—";
+  const Body = (v) => <span style={{ color: C.dim, fontFamily: SANS, fontSize: 12 }}>{String(v || "").replace(/\s+/g, " ").slice(0, 90)}</span>;
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
+        Buy & sell signals matched from dealer-group messages against your own cost & sale history — graded A–D vs <b>your</b> numbers,
+        not the open market. Showing the last {windowDays} days (through {fmtWhen(M.messagesMax)}).
+      </div>
+
+      {/* controls */}
+      <div className="flex flex-wrap items-center gap-4" style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>
+        <label className="flex items-center gap-1">Window
+          <input type="number" min={1} max={30} value={windowDays} onChange={(e) => setWindowDays(Math.max(1, parseInt(e.target.value, 10) || 1))}
+            style={{ width: 56, background: C.bg, color: C.text, border: `1px solid ${C.line}`, borderRadius: 8, padding: "3px 8px" }} /> days</label>
+        <label className="flex items-center gap-1">Buy range: within
+          <input type="number" min={0} max={100} value={costTol} onChange={(e) => setCostTol(Math.max(0, parseInt(e.target.value, 10) || 0))}
+            style={{ width: 56, background: C.bg, color: C.text, border: `1px solid ${C.line}`, borderRadius: 8, padding: "3px 8px" }} />% of your median cost</label>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={lowStockOnly} onChange={(e) => setLowStockOnly(e.target.checked)} />
+          low-stock only (&lt; 1 week)</label>
+      </div>
+
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))" }}>
+        <Stat label="Buy alerts" value={buyAlerts.length} sub="offers in your cost range" />
+        <Stat label="Sell alerts" value={sellAlerts.length} sub="wanted: watches you hold" />
+        <Stat label="Messages scanned" value={inWindow.length} sub={`last ${windowDays} days`} />
+      </div>
+
+      {/* BUY */}
+      <Panel title="Buy alerts" note="someone is selling a watch you trade, in your price range">
+        {buyAlerts.length === 0
+          ? <Locked msg="No offers landed in your cost range for this window. Widen the buy range % or window above." />
+          : <ItemTable rows={buyAlerts} cols={[
+              ["grade","Grade",(v) => <GradeBadge grade={v} />],
+              ["low","",(v) => v ? <span style={{ background: C.red, color: "#1a1410", borderRadius: 6, fontFamily: SANS, fontWeight: 700, fontSize: 10, padding: "2px 6px" }}>LOW STOCK</span> : ""],
+              ["brand","Brand"],["ref","Ref #"],
+              ["price","Offered",fmtMoney],
+              ["medianCost","Your med cost",(v) => v ? fmtMoney(v) : "—"],
+              ["stock","Stock"],
+              ["sender","From"],["chat","Group"],
+              ["body","Message",Body],["ts","When",fmtWhen],
+            ]} />}
+      </Panel>
+
+      {/* SELL */}
+      <Panel title="Sell alerts" note="someone is looking for a watch you hold">
+        {sellAlerts.length === 0
+          ? <Locked msg="No wanted-to-buy posts matched your current stock in this window." />
+          : <ItemTable rows={sellAlerts} cols={[
+              ["grade","Grade",(v) => v ? <GradeBadge grade={v} /> : <span style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>lead</span>],
+              ["brand","Brand"],["ref","Ref #"],
+              ["price","They'll pay",(v) => v ? fmtMoney(v) : "no price"],
+              ["medianSale","Your med sale",(v) => v ? fmtMoney(v) : "—"],
+              ["stock","You hold"],
+              ["sender","From"],["chat","Group"],
+              ["body","Message",Body],["ts","When",fmtWhen],
+            ]} />}
+      </Panel>
+    </div>
   );
 }
 
