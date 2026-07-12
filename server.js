@@ -4,12 +4,96 @@ import cors from "cors";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { google } from "googleapis";
+import * as XLSX from "xlsx";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+/* ---------- Google Drive: pull recent WhatsApp message sheets ---------- */
+const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+function driveCreds() {
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const p = path.join(__dirname, "service-account.json");
+  if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
+  return null;
+}
+let _drive = null;
+function getDrive() {
+  if (_drive) return _drive;
+  const creds = driveCreds();
+  if (!creds) return null;
+  const auth = new google.auth.GoogleAuth({ credentials: creds, scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
+  _drive = google.drive({ version: "v3", auth });
+  return _drive;
+}
+// map a raw message row (varied schemas) to canonical fields the dashboard reads
+function normalizeMsgRow(r) {
+  const g = (...keys) => { for (const k of keys) { if (r[k] != null && r[k] !== "") return r[k]; } return null; };
+  return {
+    intent: g("intent"),
+    brand: g("brand"),
+    model: g("model"),
+    reference: g("fullReferenceNumber", "reference", "referenceNumber"),
+    price: g("price"),
+    messageBody: g("messageBody", "body"),
+    timestamp: g("timestamp", "date"),
+    sender: g("senderName", "sender"),
+    chat: g("chatName", "chat"),
+  };
+}
+async function fetchFileRows(drive, file) {
+  let buf;
+  if (file.mimeType === "application/vnd.google-apps.spreadsheet") {
+    const res = await drive.files.export({ fileId: file.id, mimeType: "text/csv" }, { responseType: "arraybuffer" });
+    return XLSX.utils.sheet_to_json(XLSX.read(Buffer.from(res.data), { type: "buffer" }).Sheets.Sheet1 || Object.values(XLSX.read(Buffer.from(res.data), { type: "buffer" }).Sheets)[0], { defval: null });
+  }
+  const res = await drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "arraybuffer" });
+  buf = Buffer.from(res.data);
+  const wb = XLSX.read(buf, { type: "buffer" });
+  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null });
+}
+
+app.get("/api/messages", async (req, res) => {
+  const drive = getDrive();
+  if (!drive || !DRIVE_FOLDER_ID) return res.status(500).json({ error: "Google Drive not configured" });
+  const days = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 5));
+  try {
+    let files = [], token;
+    do {
+      const r = await drive.files.list({
+        q: `'${DRIVE_FOLDER_ID}' in parents and trashed=false`,
+        fields: "nextPageToken,files(id,name,mimeType)", pageSize: 1000, pageToken: token,
+        supportsAllDrives: true, includeItemsFromAllDrives: true,
+      });
+      files = files.concat(r.data.files || []); token = r.data.nextPageToken;
+    } while (token);
+    // date from filename; keep files within `days` of the newest date
+    files.forEach((f) => { const m = String(f.name).match(/(\d{4}-\d{2}-\d{2})/); f.date = m ? m[1] : ""; });
+    files = files.filter((f) => f.date).sort((a, b) => b.date.localeCompare(a.date));
+    if (!files.length) return res.json({ rows: [], files: [], latest: null });
+    const latest = files[0].date;
+    const cutoff = new Date(new Date(latest + "T00:00:00").getTime() - days * 86400000);
+    const recent = files.filter((f) => new Date(f.date + "T00:00:00") >= cutoff);
+    const rows = [];
+    for (const f of recent) {
+      try {
+        const raw = await fetchFileRows(drive, f);
+        raw.forEach((rr) => {
+          const n = normalizeMsgRow(rr);
+          const it = String(n.intent || "").toLowerCase();
+          if (it === "buy" || it === "sell") rows.push(n);
+        });
+      } catch { /* skip a bad file */ }
+    }
+    res.json({ rows, files: recent.map((f) => f.name), latest, days });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 /* ---------- WatchCharts market-value proxy (cached) ----------
    Two-step lookup per watch:

@@ -75,9 +75,9 @@ const FIELDS = {
     ["serial", "Serial # (optional)"],
   ],
   messages: [
-    ["intent", "Intent (buy/sell)"], ["brand", "Brand"], ["model", "Model / reference"],
-    ["price", "Price"], ["messageBody", "Message text"], ["timestamp", "Timestamp"],
-    ["sender", "Sender"], ["chat", "Chat / group"],
+    ["intent", "Intent (buy/sell)"], ["brand", "Brand"], ["model", "Model"],
+    ["reference", "Reference #"], ["price", "Price"], ["messageBody", "Message text"],
+    ["timestamp", "Timestamp"], ["sender", "Sender"], ["chat", "Chat / group"],
   ],
 };
 
@@ -87,6 +87,7 @@ function guessField(role, header) {
   const has = (s) => h.includes(s);
   if (role === "messages") {
     if (h === "intent") return "intent";
+    if (h === "fullreferencenumber" || h === "reference" || has("reference number")) return "reference";
     if (h === "messagebody" || has("message body") || h === "body") return "messageBody";
     if (h === "timestamp" || h === "date" || has("time")) return "timestamp";
     if (h === "sendername" || has("sender")) return "sender";
@@ -1086,8 +1087,8 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     msg.rows.forEach((r) => {
       const intent = String(r[mm.intent] || "").toLowerCase().trim();
       if (intent !== "buy" && intent !== "sell") return;
-      const rawModel = r[mm.model], rawBrand = r[mm.brand];
-      const ref = normRef(rawModel) || normRef(rawBrand);
+      const rawModel = r[mm.model], rawBrand = r[mm.brand], rawRef = mm.reference ? r[mm.reference] : null;
+      const ref = normRef(rawModel) || normRef(rawRef) || normRef(rawBrand);
       if (!ref || ref.length < 4) return;
       parsed.push({
         intent, price: toNum(r[mm.price]), ts: toDate(r[mm.timestamp]),
@@ -1542,6 +1543,35 @@ export default function WatchBI() {
   function removeDs(id) { setDatasets((ds) => ds.filter((d) => d.id !== id)); }
 
   const active = datasets.filter((d) => d.role !== "ignore");
+
+  // pull recent WhatsApp messages from Google Drive and inject as a messages dataset
+  const [msgSync, setMsgSync] = useState({ state: "idle", info: null });
+  const MSG_COLS = ["intent", "brand", "model", "reference", "price", "messageBody", "timestamp", "sender", "chat"];
+  const MSG_MAP = Object.fromEntries(MSG_COLS.map((c) => [c, c]));
+  async function syncGoogleMessages(days = 5) {
+    setMsgSync({ state: "loading", info: null });
+    try {
+      const res = await fetch(`/api/messages?days=${days}`);
+      const data = await res.json();
+      if (data.error) { setMsgSync({ state: "error", info: data.error }); return; }
+      const ds = {
+        id: "google-messages", fileName: "Google Drive",
+        sheetName: `messages · last ${data.days}d`, columns: MSG_COLS, rows: data.rows || [],
+        role: "messages", mapping: MSG_MAP,
+      };
+      setDatasets((prev) => [...prev.filter((d) => d.id !== "google-messages"), ds]);
+      setMsgSync({ state: "loaded", info: { count: (data.rows || []).length, latest: data.latest, files: (data.files || []).length } });
+    } catch (e) {
+      setMsgSync({ state: "error", info: String(e && e.message || e) });
+    }
+  }
+  // auto-pull once when the dashboard opens (if not already loaded)
+  useEffect(() => {
+    if (stage === "dash" && msgSync.state === "idle" && !datasets.some((d) => d.id === "google-messages")) {
+      syncGoogleMessages(5);
+    }
+  }, [stage]);
+
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [includePresold, setIncludePresold] = useState(false);
   // sales period: "last N days from today" window, on by default (45 days), adjustable / switchable
@@ -1586,7 +1616,7 @@ export default function WatchBI() {
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
       )}
-      {stage === "dash" && metrics && <Dashboard M={metrics} MFull={metricsFull} MExcl={metricsExcl} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} salesWindowOn={salesWindowOn} setSalesWindowOn={setSalesWindowOn} salesWindowDays={salesWindowDays} setSalesWindowDays={setSalesWindowDays} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} excludedModels={excludedModels} setExcludedModels={setExcludedModels} exclScope={exclScope} setExclScope={setExclScope} />}
+      {stage === "dash" && metrics && <Dashboard M={metrics} MFull={metricsFull} MExcl={metricsExcl} dateRange={dateRange} setDateRange={setDateRange} includePresold={includePresold} setIncludePresold={setIncludePresold} salesWindowOn={salesWindowOn} setSalesWindowOn={setSalesWindowOn} salesWindowDays={salesWindowDays} setSalesWindowDays={setSalesWindowDays} invStatusFilter={invStatusFilter} setInvStatusFilter={setInvStatusFilter} excludedModels={excludedModels} setExcludedModels={setExcludedModels} exclScope={exclScope} setExclScope={setExclScope} msgSync={msgSync} onSyncMessages={syncGoogleMessages} />}
     </div>
   );
 }
@@ -1703,7 +1733,7 @@ function MapView({ datasets, setRole, setMap, removeDs, onBuild, onAdd }) {
 /* ---------- dashboard ---------- */
 const ON_HOLD_STATUS = "On Hold / Reserved";
 
-function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, setIncludePresold, salesWindowOn, setSalesWindowOn, salesWindowDays, setSalesWindowDays, invStatusFilter, setInvStatusFilter, excludedModels, setExcludedModels, exclScope, setExclScope }) {
+function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, setIncludePresold, salesWindowOn, setSalesWindowOn, salesWindowDays, setSalesWindowDays, invStatusFilter, setInvStatusFilter, excludedModels, setExcludedModels, exclScope, setExclScope, msgSync, onSyncMessages }) {
   const hasExcl = excludedModels && excludedModels.size > 0;
   const addExcl = (k) => setExcludedModels((prev) => new Set(prev).add(k));
   const removeExcl = (k) => setExcludedModels((prev) => { const n = new Set(prev); n.delete(k); return n; });
@@ -1714,7 +1744,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
     M.hasSales && ["sales", "Sales", TrendingUp],
     M.hasSales && ["buy", "Buy Signals", Sparkles],
     (M.hasInv || M.hasSales) && ["liabilities", "Liabilities", AlertTriangle],
-    M.hasMessages && ["alerts", "Alerts", Bell],
+    (M.hasMessages || (msgSync && msgSync.state !== "idle")) && ["alerts", "Alerts", Bell],
   ].filter(Boolean);
 
   // filters shared across Inventory / Sales / Buy tabs
@@ -1900,7 +1930,7 @@ function Dashboard({ M, MFull, MExcl, dateRange, setDateRange, includePresold, s
         {tab === "sales" && <SalesTab M={M} filters={filters} />}
         {tab === "buy" && <BuyTab M={M} filters={filters} includePresold={includePresold} />}
         {tab === "liabilities" && <LiabilitiesTab M={M} />}
-        {tab === "alerts" && <AlertsTab M={M} />}
+        {tab === "alerts" && <AlertsTab M={M} msgSync={msgSync} onSyncMessages={onSyncMessages} />}
       </div>
     </div>
   );
@@ -2034,7 +2064,7 @@ function LatestMarketTable({ rows }) {
 }
 
 /* ---------- Alerts: buy/sell signals from WhatsApp dealer-group messages ---------- */
-function AlertsTab({ M }) {
+function AlertsTab({ M, msgSync, onSyncMessages }) {
   const [windowDays, setWindowDays] = useState(3);
   const [costTol, setCostTol] = useState(10);   // % above your median cost still "in range"
   const [lowStockOnly, setLowStockOnly] = useState(false);
@@ -2087,12 +2117,26 @@ function AlertsTab({ M }) {
   const fmtWhen = (d) => d ? new Date(d).toISOString().slice(0, 10) : "—";
   const Body = (v) => <span style={{ color: C.dim, fontFamily: SANS, fontSize: 12 }}>{String(v || "").replace(/\s+/g, " ").slice(0, 90)}</span>;
 
+  const syncing = msgSync && msgSync.state === "loading";
+  const syncErr = msgSync && msgSync.state === "error";
   return (
     <div className="flex flex-col gap-5">
-      <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>
-        Buy & sell signals matched from dealer-group messages against your own cost & sale history — graded A–D vs <b>your</b> numbers,
-        not the open market. Showing the last {windowDays} days (through {fmtWhen(M.messagesMax)}).
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12, maxWidth: 640 }}>
+          Buy & sell signals matched from dealer-group messages against your own cost & sale history — graded A–D vs <b>your</b> numbers,
+          not the open market. Showing the last {windowDays} days (through {fmtWhen(M.messagesMax)}).
+        </div>
+        {onSyncMessages && (
+          <button onClick={() => onSyncMessages(5)} disabled={syncing}
+            style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: syncing ? C.faint : C.gold, whiteSpace: "nowrap" }}
+            className="px-3 py-1.5">{syncing ? "Syncing…" : "↻ Sync from Google Drive"}</button>
+        )}
       </div>
+      {syncErr && <div style={{ color: C.red, fontFamily: SANS, fontSize: 12 }}>Google sync failed: {String(msgSync.info)}</div>}
+
+      {!M.hasMessages ? (
+        <Locked msg={syncing ? "Pulling recent messages from Google Drive…" : "No messages loaded. Click 'Sync from Google Drive' above, or upload message sheets."} />
+      ) : (<>
 
       {/* controls */}
       <div className="flex flex-wrap items-center gap-4" style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>
@@ -2143,6 +2187,7 @@ function AlertsTab({ M }) {
               ["body","Message",Body],["ts","When",fmtWhen],
             ]} />}
       </Panel>
+      </>)}
     </div>
   );
 }

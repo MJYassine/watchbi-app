@@ -4,3 +4,5 @@ dist
 .DS_Store
 
 .market-cache.json
+
+service-account.json
