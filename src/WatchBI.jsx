@@ -774,9 +774,10 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     fullSalesRows.forEach((x) => {
       const rf = normRef(x.modelNumber);
       if (!rf) return;
-      refSal[rf] = refSal[rf] || { costs: [], sales: [], recent: 0, brand: x.brand, model: x.chartName || x.modelName };
+      refSal[rf] = refSal[rf] || { costs: [], sales: [], recent: 0, lastSale: null, brand: x.brand, model: x.chartName || x.modelName };
       if (x.cost) refSal[rf].costs.push(x.cost);
       if (x.price) refSal[rf].sales.push(x.price);
+      if (x.saleDate && (!refSal[rf].lastSale || x.saleDate > refSal[rf].lastSale)) refSal[rf].lastSale = x.saleDate;
     });
     rows.forEach((x) => { const rf = normRef(x.modelNumber); if (rf && refSal[rf]) refSal[rf].recent++; });
     out._refSal = refSal;
@@ -1055,13 +1056,13 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
   // ── reference positions (for the Alerts engine): merge inventory + sales by ref ──
   const refPos = {};
   const seed = (rf, o) => {
-    refPos[rf] = refPos[rf] || { ref: rf, stock: 0, costs: [], sales: [], recent: 0, brand: null, model: null };
+    refPos[rf] = refPos[rf] || { ref: rf, stock: 0, costs: [], sales: [], recent: 0, lastSale: null, brand: null, model: null };
     if (o.brand && !refPos[rf].brand) refPos[rf].brand = o.brand;
     if (o.model && !refPos[rf].model) refPos[rf].model = o.model;
     return refPos[rf];
   };
   Object.entries(out._refInv || {}).forEach(([rf, v]) => { const p = seed(rf, v); p.stock += v.stock; p.costs.push(...v.costs); });
-  Object.entries(out._refSal || {}).forEach(([rf, v]) => { const p = seed(rf, v); p.costs.push(...v.costs); p.sales.push(...v.sales); p.recent += v.recent; });
+  Object.entries(out._refSal || {}).forEach(([rf, v]) => { const p = seed(rf, v); p.costs.push(...v.costs); p.sales.push(...v.sales); p.recent += v.recent; if (v.lastSale && (!p.lastSale || v.lastSale > p.lastSale)) p.lastSale = v.lastSale; });
   const wks = out.salesWeeks || (45 / 7);
   out.refPositions = {};
   for (const rf in refPos) {
@@ -1074,6 +1075,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       medianCost: median(p.costs), loCost: pctile(p.costs, 10), hiCost: pctile(p.costs, 90),
       maxCost: p.costs.length ? Math.max(...p.costs) : null,
       medianSale: median(p.sales),
+      lastSale: p.lastSale,
     };
   }
   delete out._refInv; delete out._refSal;
@@ -1082,14 +1084,27 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
   // supports several daily files dropped together
   const msgSets = datasets.filter((d) => d.role === "messages");
   const parsed = [];
+  // build candidate reference keys, PREFERRING the structured fullReferenceNumber
+  // over the loose `model` field (which the upstream parser sometimes fills with a
+  // price), then resolve to whichever candidate we actually trade.
+  const stripVariant = (s) => String(s || "").trim().replace(/-\d{3,4}$/, ""); // drop "-0013" style variant suffix
+  const refCandidates = (rawRef, rawModel, rawBrand) => {
+    // fullReferenceNumber is authoritative — when present, do NOT fall back to the
+    // loose `model` field (it sometimes holds the price, e.g. "15200")
+    const c = rawRef
+      ? [normRef(stripVariant(rawRef)), normRef(rawRef)]
+      : [normRef(rawModel), normRef(rawBrand)];
+    return c.filter((x) => x && x.length >= 4);
+  };
   msgSets.forEach((msg) => {
     const mm = msg.mapping;
     msg.rows.forEach((r) => {
       const intent = String(r[mm.intent] || "").toLowerCase().trim();
       if (intent !== "buy" && intent !== "sell") return;
       const rawModel = r[mm.model], rawBrand = r[mm.brand], rawRef = mm.reference ? r[mm.reference] : null;
-      const ref = normRef(rawModel) || normRef(rawRef) || normRef(rawBrand);
-      if (!ref || ref.length < 4) return;
+      const cands = refCandidates(rawRef, rawModel, rawBrand);
+      if (!cands.length) return;
+      const ref = cands.find((c) => out.refPositions[c]) || cands[0]; // prefer one we trade
       parsed.push({
         intent, price: toNum(r[mm.price]), ts: toDate(r[mm.timestamp]),
         body: r[mm.messageBody] || null, sender: r[mm.sender] || null, chat: r[mm.chat] || null,
@@ -2073,6 +2088,17 @@ function AlertsTab({ M, msgSync, onSyncMessages }) {
   const anchor = M.messagesMax ? M.messagesMax.getTime() : Date.now();
   const startT = anchor - windowDays * 86400000;
   const pos = M.refPositions || {};
+  const STALE_MS = 18 * 30.44 * 86400000;        // 18 months
+  const staleCutoff = Date.now() - STALE_MS;
+
+  // is the message's price actually present in its text? catches mis-parsed prices.
+  // "ok" = found, "mismatch" = body has other numbers but not this one, "unverified" = can't tell
+  const priceCheck = (price, body) => {
+    if (!price) return "noprice";
+    const nums = (String(body || "").match(/\d[\d,]{2,}/g) || []).map((n) => parseInt(n.replace(/,/g, ""), 10)).filter((v) => v >= 100);
+    if (!nums.length) return "unverified";
+    return nums.some((v) => Math.abs(v - price) <= Math.max(50, price * 0.03)) ? "ok" : "mismatch";
+  };
 
   const inWindow = (M.messages || []).filter((m) => m.ts && m.ts.getTime() >= startT);
 
@@ -2082,7 +2108,12 @@ function AlertsTab({ M, msgSync, onSyncMessages }) {
   inWindow.forEach((m) => {
     if (m.intent !== "sell" || !m.price) return;
     const p = pos[m.ref]; if (!p || !p.medianCost) return;
-    if (m.price > p.medianCost * 3) return;                       // drop mis-parsed / mismatched prices
+    // 18-month freshness: don't suggest buying something we haven't sold in 18 months
+    if (!p.lastSale || p.lastSale.getTime() < staleCutoff) return;
+    // sanity cap: price must be within a believable band of our cost
+    if (m.price < p.medianCost * 0.4 || m.price > p.medianCost * 2.5) return;
+    // double-check the price appears in the message text
+    if (priceCheck(m.price, m.body) === "mismatch") return;
     if (m.price > p.medianCost * (1 + costTol / 100)) return;     // out of your buy range
     const low = p.weeksOfStock != null && p.weeksOfStock < 1;
     if (lowStockOnly && !low) return;
@@ -2091,7 +2122,8 @@ function AlertsTab({ M, msgSync, onSyncMessages }) {
     buyAlerts.push({
       grade: qocGrade(m.price, p.medianCost), ref: m.ref, brand: p.brand, model: p.model,
       price: m.price, medianCost: p.medianCost, loCost: p.loCost, hiCost: p.hiCost,
-      stock: p.stock, low, sender: m.sender, chat: m.chat, body: m.body, ts: m.ts,
+      stock: p.stock, low, verified: priceCheck(m.price, m.body) === "ok",
+      sender: m.sender, chat: m.chat, body: m.body, ts: m.ts,
     });
   });
   const gradeOrder = { A: 0, B: 1, C: 2, D: 3, null: 4 };
@@ -2103,12 +2135,17 @@ function AlertsTab({ M, msgSync, onSyncMessages }) {
   inWindow.forEach((m) => {
     if (m.intent !== "buy") return;
     const p = pos[m.ref]; if (!p || !p.stock) return;
-    if (m.price && p.medianCost && m.price > (p.medianSale || p.medianCost) * 4) return; // drop garbage prices
-    const dk = m.ref + "|" + (m.sender || "") + "|" + (m.price || "");
+    // sanity cap + price double-check: if the stated price is implausible or not in
+    // the text, drop the price and treat it as an ungraded lead rather than a bad grade
+    let price = m.price;
+    const ref = p.medianSale || p.medianCost;
+    if (price && ref && (price < ref * 0.3 || price > ref * 3)) price = null;
+    if (price && priceCheck(price, m.body) === "mismatch") price = null;
+    const dk = m.ref + "|" + (m.sender || "") + "|" + (price || "np");
     if (sellSeen.has(dk)) return; sellSeen.add(dk);
-    const grade = (m.price && p.medianSale) ? salesGrade(m.price, p.medianSale) : null;
+    const grade = (price && p.medianSale) ? salesGrade(price, p.medianSale) : null;
     sellAlerts.push({
-      grade, ref: m.ref, brand: p.brand, model: p.model, price: m.price || null,
+      grade, ref: m.ref, brand: p.brand, model: p.model, price: price || null,
       medianSale: p.medianSale, stock: p.stock, sender: m.sender, chat: m.chat, body: m.body, ts: m.ts,
     });
   });
