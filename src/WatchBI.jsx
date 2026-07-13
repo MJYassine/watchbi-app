@@ -294,6 +294,41 @@ function qotGrade(target, market) {
   if (d <= 3) return "A"; if (d <= 8) return "B"; if (d <= 15) return "C"; return "D";
 }
 
+/* DJ's grade (single sale): a points system per DJ Allen — "each data point is 1 point."
+   Scores Margin, Days-on-hand, and Gross-profit-$, each A=4..D=1, averaged → A/B/C/D.
+   Averaging resolves conflicting factors (e.g. A-margin / D-days). All thresholds are
+   configurable per dealer (this DJ_GRADE_CFG is DJ's default set — to be fine-tuned). */
+const DJ_GRADE_CFG = {
+  margin: { A: 30, B: 20, C: 10 },      // GP% (profit/cost), higher better
+  days: { A: 30, B: 60, C: 120 },       // days on hand, lower better
+  profit: { A: 5000, B: 2500, C: 1000 },// gross profit $, higher better
+  weights: { margin: 1, days: 1, profit: 1 },
+};
+function factorPoints(value, bands, higherBetter) {
+  if (value == null || isNaN(value)) return null;
+  if (higherBetter) return value >= bands.A ? 4 : value >= bands.B ? 3 : value >= bands.C ? 2 : 1;
+  return value <= bands.A ? 4 : value <= bands.B ? 3 : value <= bands.C ? 2 : 1;
+}
+function ptsToGrade(avg) {
+  if (avg == null) return null;
+  return avg >= 3.5 ? "A" : avg >= 2.5 ? "B" : avg >= 1.5 ? "C" : "D";
+}
+// sale = { marginPct, days, profit }; returns { grade, points, parts }
+function djSaleGrade(sale, cfg = DJ_GRADE_CFG) {
+  const parts = {
+    margin: factorPoints(sale.marginPct, cfg.margin, true),
+    days: factorPoints(sale.days, cfg.days, false),
+    profit: factorPoints(sale.profit, cfg.profit, true),
+  };
+  let sum = 0, wsum = 0;
+  for (const k of ["margin", "days", "profit"]) {
+    if (parts[k] != null) { sum += parts[k] * cfg.weights[k]; wsum += cfg.weights[k]; }
+  }
+  if (!wsum) return { grade: null, points: null, parts };
+  const avg = sum / wsum;
+  return { grade: ptsToGrade(avg), points: +avg.toFixed(2), parts };
+}
+
 function normalizeBrand(b) {
   if (!b) return null;
   let s = String(b).trim().toLowerCase();
@@ -798,17 +833,29 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     allSalesRows.forEach((x) => {
       if (!x.salesperson) return;
       const k = x.salesperson;
-      bperson[k] = bperson[k] || { salesperson: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [] };
+      bperson[k] = bperson[k] || { salesperson: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [], _pts: [], sales: [] };
       bperson[k].units++; bperson[k].profit += x.profit; bperson[k].revenue += x.price; bperson[k].cost += x.cost;
       if (x.days != null) bperson[k]._days.push(x.days);
       if (x.marginPct != null) bperson[k]._m.push(x.marginPct);
+      const dj = djSaleGrade({ marginPct: x.marginPct, days: x.days, profit: x.profit });
+      if (dj.points != null) bperson[k]._pts.push(dj.points);
+      bperson[k].sales.push({
+        saleDate: x.saleDate, brand: x.brand, model: x.chartName || x.modelName, reference: x.modelNumber,
+        price: x.price, cost: x.cost, profit: x.profit, marginPct: x.marginPct, days: x.days,
+        djGrade: dj.grade, djPoints: dj.points,
+      });
     });
-    out.salesByPerson = Object.values(bperson).map((b) => ({
-      salesperson: b.salesperson, units: b.units, profit: b.profit, revenue: b.revenue,
-      avgProfit: b.units ? b.profit / b.units : null,
-      profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
-      medianDays: median(b._days), medianMargin: median(b._m),
-    })).sort((a, b) => b.profit - a.profit);
+    out.salesByPerson = Object.values(bperson).map((b) => {
+      const avgPts = b._pts.length ? b._pts.reduce((s, v) => s + v, 0) / b._pts.length : null;
+      return {
+        salesperson: b.salesperson, units: b.units, profit: b.profit, revenue: b.revenue,
+        avgProfit: b.units ? b.profit / b.units : null,
+        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+        medianDays: median(b._days), medianMargin: median(b._m),
+        djGrade: ptsToGrade(avgPts), djPoints: avgPts != null ? +avgPts.toFixed(2) : null,
+        sales: b.sales.sort((a, c) => (c.saleDate || 0) - (a.saleDate || 0)),
+      };
+    }).sort((a, b) => b.profit - a.profit);
     out.hasSalesperson = allSalesRows.some((x) => x.salesperson);
 
     // by type (always available)
@@ -2684,6 +2731,7 @@ function SalesTab({ M, filters }) {
   const [expandedLine, setExpandedLine] = useState(null);
   const [expandedBrand, setExpandedBrand] = useState(null);
   const [expandedVelBrand, setExpandedVelBrand] = useState(null);
+  const [expandedPerson, setExpandedPerson] = useState(null);
   const lineTableRef = useRef(null);
   const handleLineBarClick = (data) => {
     const line = data?.payload?.line ?? data?.line;
@@ -2818,11 +2866,36 @@ function SalesTab({ M, filters }) {
               </div>
             </div>
             <div className="mt-3">
-              <ItemTable rows={M.salesByPerson} cols={[
-                ["salesperson","Salesperson"],["units","Units"],
-                ["revenue","Sales $",fmtMoney],["profit","Profit $",fmtMoney],
-                ["profitPct","Margin %",fmtPct],["medianDays","Velocity (median days)"],
-              ]} />
+              <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">
+                Click a salesperson to see each sale they made, graded by <b>DJ's grade</b> (margin + days-on-hand + gross profit). Their letter is the average across their sales.
+              </div>
+              <ItemTable rows={M.salesByPerson}
+                getRowKey={(r) => r.salesperson}
+                expandedKey={expandedPerson}
+                onRowClick={(r) => setExpandedPerson((p) => p === r.salesperson ? null : r.salesperson)}
+                renderExpanded={(r) => (
+                  (r.sales && r.sales.length) ? (
+                    <div>
+                      <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
+                        {r.salesperson} — {r.sales.length} sales · avg DJ grade <GradeBadge grade={r.djGrade} /> {r.djPoints != null ? `(${r.djPoints})` : ""}
+                      </div>
+                      <ItemTable rows={r.sales.slice(0, 200)} cols={[
+                        ["saleDate","Date",(v) => v ? new Date(v).toISOString().slice(0, 10) : "—"],
+                        ["brand","Brand"],["model","Model"],["reference","Ref #"],
+                        ["price","Sold for",fmtMoney],["profit","Profit $",fmtMoney],
+                        ["marginPct","Margin %",(v) => fmtPct(v)],["days","Days on hand"],
+                        ["djGrade","DJ grade",(v) => <GradeBadge grade={v} />],
+                      ]} />
+                    </div>
+                  ) : <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No individual sales recorded.</div>
+                )}
+                cols={[
+                  ["salesperson","Salesperson"],
+                  ["djGrade","DJ grade",(v) => <GradeBadge grade={v} />],
+                  ["units","Units"],
+                  ["revenue","Sales $",fmtMoney],["profit","Profit $",fmtMoney],
+                  ["profitPct","Margin %",fmtPct],["medianDays","Velocity (median days)"],
+                ]} />
             </div>
           </>)}
         </Panel>
