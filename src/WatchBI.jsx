@@ -1700,6 +1700,10 @@ export default function WatchBI() {
         )}
       </div>
 
+      {/* file input lives at app level so it works on every stage (upload + map "add file") */}
+      <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
+        onChange={(e) => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; }} />
+
       {stage === "upload" && <UploadView fileRef={fileRef} onFiles={handleFiles} err={err} onLoadWatchOps={loadWatchOpsInventory} invSync={invSync} />}
       {stage === "map" && (
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
@@ -1716,8 +1720,6 @@ function UploadView({ fileRef, onFiles, err, onLoadWatchOps, invSync }) {
   const loadingInv = invSync && invSync.state === "loading";
   return (
     <div className="p-8 flex flex-col items-center" style={{ minHeight: 480, justifyContent: "center" }}>
-      <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
-        onChange={(e) => e.target.files.length && onFiles(e.target.files)} />
       {err && (
         <div style={{ background: "#3a201b", border: `1px solid ${C.red}`, color: C.text, borderRadius: 10, maxWidth: 560 }}
           className="px-4 py-3 mb-4 text-sm flex items-center gap-2 w-full">
