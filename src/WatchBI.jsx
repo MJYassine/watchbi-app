@@ -1122,10 +1122,26 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       medianCost: median(p.costs), loCost: pctile(p.costs, 10), hiCost: pctile(p.costs, 90),
       maxCost: p.costs.length ? Math.max(...p.costs) : null,
       medianSale: median(p.sales),
+      soldCount: p.sales.length,
       lastSale: p.lastSale,
     };
   }
   delete out._refInv; delete out._refSal;
+
+  // ── funding pool: every model we've traded (all-time) with a cost basis, ranked by
+  //    demand × profit, so a budget can be spread across many real options ──
+  out.fundingModels = Object.values(out.refPositions)
+    .filter((p) => p.medianCost && p.medianCost > 0 && p.soldCount >= 1)
+    .map((p) => {
+      const unitProfit = (p.medianSale && p.medianSale > p.medianCost) ? p.medianSale - p.medianCost : 0;
+      return {
+        brand: p.brand, model: p.model, ref: p.ref,
+        avgCost: p.medianCost, avgProfit: unitProfit,
+        soldCount: p.soldCount, stock: p.stock,
+        score: p.soldCount * unitProfit, // total historical profit contribution
+      };
+    })
+    .sort((a, b) => b.score - a.score);
 
   // ── WhatsApp dealer-group messages (buy/sell intents) for the Alerts engine ──
   // supports several daily files dropped together
@@ -3284,9 +3300,9 @@ function BuyHierarchy({ brands }) {
 
 /* Funding Scenarios: given a budget, spread it across the top buy-signal models
    (one unit each, down the ranking) using projected cost = avg historical total cost */
-function FundingScenarios({ ranking }) {
+function FundingScenarios({ pool }) {
   const [budget, setBudget] = useState(50000);
-  const priced = ranking.filter((m) => m.avgCost && m.avgCost > 0);
+  const priced = (pool || []).filter((m) => m.avgCost && m.avgCost > 0);
   let remaining = budget;
   const picks = [];
   for (const m of priced) {
@@ -3324,8 +3340,8 @@ function FundingScenarios({ ranking }) {
       {picks.length === 0
         ? <Locked msg={priced.length === 0 ? "No models have a cost basis yet (need historical sales cost)." : "Budget too small for even the cheapest ranked watch."} />
         : <ItemTable rows={picks} cols={[
-            ["brand","Brand"],["model","Model"],["avgCost","Proj. cost",fmtMoney],
-            ["avgProfit","Avg profit",fmtMoney],["medianDays","Median days"],["buyScore","Score",(v) => v?.toFixed(3)],
+            ["brand","Brand"],["model","Model"],["ref","Ref #"],["avgCost","Proj. cost",fmtMoney],
+            ["avgProfit","Avg profit",fmtMoney],["soldCount","Times sold"],["stock","In stock"],
           ]} />}
     </div>
   );
@@ -3467,7 +3483,7 @@ function BuyTab({ M, filters, includePresold }) {
 
       {/* Funding scenarios */}
       <QuestionCard num="$" question="Funding scenarios — what to buy with your budget">
-        <FundingScenarios ranking={ranking} />
+        <FundingScenarios pool={applyFilters(M.fundingModels, filters)} />
       </QuestionCard>
 
       {/* Fastest 10 */}
