@@ -1613,7 +1613,10 @@ export default function WatchBI() {
     setInvSync({ state: "loading", info: null });
     try {
       const res = await fetch("/api/inventory");
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch { setInvSync({ state: "error", info: `Server returned ${res.status}${text ? " — " + text.slice(0, 140) : " (empty response — is the backend running?)"}` }); return; }
       if (data.error) { setInvSync({ state: "error", info: data.error }); return; }
       const mapping = Object.fromEntries(INV_COLS.map((c) => [c, c]));
       const ds = {
@@ -1635,7 +1638,10 @@ export default function WatchBI() {
     setMsgSync({ state: "loading", info: null });
     try {
       const res = await fetch(`/api/messages?days=${days}`);
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch { setMsgSync({ state: "error", info: `Server returned ${res.status}${text ? " — " + text.slice(0, 140) : " (empty response — is the backend running?)"}` }); return; }
       if (data.error) { setMsgSync({ state: "error", info: data.error }); return; }
       const ds = {
         id: "google-messages", fileName: "Google Drive",

@@ -208,15 +208,19 @@ app.get("/api/inventory", async (req, res) => {
       const r = await fetch(`${WO_BASE}/inventories`, {
         method: "POST", headers: { Authorization: `Bearer ${WO_TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify({ status: "ALL", type: "ALL", limit, page_no: page }),
+        signal: AbortSignal.timeout(30000),
       });
+      if (!r.ok) { if (page === 1) return res.status(502).json({ error: `WatchOps returned ${r.status} — token may be expired` }); break; }
       const j = await r.json();
-      if (!j || j.success !== 1 || !Array.isArray(j.data)) break;
+      if (!j || j.success !== 1 || !Array.isArray(j.data)) { if (page === 1) return res.status(502).json({ error: "WatchOps returned no data (check the token)" }); break; }
       if (page === 1) { total = parseInt(j.totalInventory || "0", 10) || j.data.length; totalCost = woNum(j.totalCost); }
       all = all.concat(j.data);
       if (j.data.length < limit) break;
       page++;
     }
-    const rows = all.filter((x) => !x.sold).map(mapWoItem);
+    // exclude sold and voided items — keep only live, valid holdings
+    const isVoided = (x) => /void/i.test(String(x.status || "")) || x.voidreason != null || x.purchase_voidreason != null;
+    const rows = all.filter((x) => !x.sold && !isVoided(x)).map(mapWoItem);
     const payload = { rows, count: rows.length, total, totalCost };
     _invCache = { at: Date.now(), payload };
     res.json(payload);
