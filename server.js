@@ -4,8 +4,7 @@ import cors from "cors";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { google } from "googleapis";
-import * as XLSX from "xlsx";
+import { JWT } from "google-auth-library";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,15 +27,37 @@ function driveCreds() {
   }
   return { error: "No credentials — set the GOOGLE_SERVICE_ACCOUNT_JSON env var (paste the whole key file)" };
 }
-let _drive = null;
-function getDrive() {
-  if (_drive) return { drive: _drive };
+// lightweight auth: a JWT client (no giant googleapis lib). returns { client } or { error }
+let _jwt = null;
+function getDriveAuth() {
+  if (_jwt) return { client: _jwt };
   if (!DRIVE_FOLDER_ID) return { error: "GOOGLE_DRIVE_FOLDER_ID env var is not set" };
   const c = driveCreds();
   if (c.error) return { error: c.error };
-  const auth = new google.auth.GoogleAuth({ credentials: c.creds, scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
-  _drive = google.drive({ version: "v3", auth });
-  return { drive: _drive };
+  _jwt = new JWT({ email: c.creds.client_email, key: c.creds.private_key, scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
+  return { client: _jwt };
+}
+async function driveToken(client) {
+  const t = await client.getAccessToken();
+  return t && t.token;
+}
+// minimal RFC-4180 CSV parser (handles quoted commas/newlines in messageBody)
+function csvToObjects(text) {
+  const rows = []; let row = [], field = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else if (c !== "\r") field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  if (!rows.length) return [];
+  const headers = rows[0];
+  return rows.slice(1).map((r) => { const o = {}; headers.forEach((h, i) => { o[h] = r[i] ?? null; }); return o; });
 }
 // map a raw message row (varied schemas) to canonical fields the dashboard reads
 function normalizeMsgRow(r) {
@@ -53,37 +74,47 @@ function normalizeMsgRow(r) {
     chat: g("chatName", "chat"),
   };
 }
-async function fetchFileRows(drive, file) {
-  let buf;
+// fetch one file's rows via the Drive REST API. Native Sheets are exported to CSV;
+// .csv files are downloaded directly. (Rare .xlsx files are skipped — no xlsx lib.)
+async function fetchFileRows(token, file) {
+  let url;
   if (file.mimeType === "application/vnd.google-apps.spreadsheet") {
-    const res = await drive.files.export({ fileId: file.id, mimeType: "text/csv" }, { responseType: "arraybuffer" });
-    return XLSX.utils.sheet_to_json(XLSX.read(Buffer.from(res.data), { type: "buffer" }).Sheets.Sheet1 || Object.values(XLSX.read(Buffer.from(res.data), { type: "buffer" }).Sheets)[0], { defval: null });
+    url = `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/csv`;
+  } else if (file.mimeType === "text/csv") {
+    url = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&supportsAllDrives=true`;
+  } else {
+    return [];
   }
-  const res = await drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "arraybuffer" });
-  buf = Buffer.from(res.data);
-  const wb = XLSX.read(buf, { type: "buffer" });
-  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null });
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) return [];
+  return csvToObjects(await r.text());
 }
 
 const _msgCache = {}; // days -> { at, payload }
 const MSG_TTL = 30 * 60 * 1000; // 30 min — the folder updates once a day
 app.get("/api/messages", async (req, res) => {
-  const g = getDrive();
+  const g = getDriveAuth();
   if (g.error) return res.status(500).json({ error: g.error });
-  const drive = g.drive;
-  const days = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 5));
+  const days = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 4));
   const cached = _msgCache[days];
   if (cached && Date.now() - cached.at < MSG_TTL && !req.query.force) return res.json(cached.payload);
   try {
-    let files = [], token;
+    const token = await driveToken(g.client);
+    if (!token) return res.status(502).json({ error: "Google auth failed (check the service-account key)" });
+    // list the folder via Drive REST
+    let files = [], pageToken;
     do {
-      const r = await drive.files.list({
+      const params = new URLSearchParams({
         q: `'${DRIVE_FOLDER_ID}' in parents and trashed=false`,
-        fields: "nextPageToken,files(id,name,mimeType)", pageSize: 1000, pageToken: token,
-        supportsAllDrives: true, includeItemsFromAllDrives: true,
+        fields: "nextPageToken,files(id,name,mimeType)", pageSize: "1000",
+        supportsAllDrives: "true", includeItemsFromAllDrives: "true",
       });
-      files = files.concat(r.data.files || []); token = r.data.nextPageToken;
-    } while (token);
+      if (pageToken) params.set("pageToken", pageToken);
+      const r = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) return res.status(502).json({ error: `Google Drive list failed (${r.status})` });
+      const j = await r.json();
+      files = files.concat(j.files || []); pageToken = j.nextPageToken;
+    } while (pageToken);
     // date from filename; keep files within `days` of the newest date
     files.forEach((f) => { const m = String(f.name).match(/(\d{4}-\d{2}-\d{2})/); f.date = m ? m[1] : ""; });
     files = files.filter((f) => f.date).sort((a, b) => b.date.localeCompare(a.date));
@@ -94,12 +125,12 @@ app.get("/api/messages", async (req, res) => {
     const rows = [];
     for (const f of recent) {
       try {
-        const raw = await fetchFileRows(drive, f);
-        raw.forEach((rr) => {
+        const raw = await fetchFileRows(token, f);
+        for (const rr of raw) {
           const n = normalizeMsgRow(rr);
           const it = String(n.intent || "").toLowerCase();
           if (it === "buy" || it === "sell") rows.push(n);
-        });
+        }
       } catch { /* skip a bad file */ }
     }
     const payload = { rows, files: recent.map((f) => f.name), latest, days };
