@@ -1606,6 +1606,27 @@ export default function WatchBI() {
 
   const active = datasets.filter((d) => d.role !== "ignore");
 
+  // pull the dealer's live inventory from the WatchOps API and inject as an inventory dataset
+  const [invSync, setInvSync] = useState({ state: "idle", info: null });
+  const INV_COLS = ["brand", "modelName", "modelNumber", "cost", "purchaseDate", "targetWholesale", "tagPrice", "condition", "status", "invType", "paymentStatus", "supplier", "serial"];
+  async function loadWatchOpsInventory() {
+    setInvSync({ state: "loading", info: null });
+    try {
+      const res = await fetch("/api/inventory");
+      const data = await res.json();
+      if (data.error) { setInvSync({ state: "error", info: data.error }); return; }
+      const mapping = Object.fromEntries(INV_COLS.map((c) => [c, c]));
+      const ds = {
+        id: "watchops-inventory", fileName: "WatchOps API",
+        sheetName: `live inventory · ${data.count} watches`, columns: INV_COLS, rows: data.rows || [],
+        role: "inventory", mapping,
+      };
+      setDatasets((prev) => [...prev.filter((d) => d.id !== "watchops-inventory"), ds]);
+      setInvSync({ state: "loaded", info: { count: data.count } });
+      setStage("map");
+    } catch (e) { setInvSync({ state: "error", info: String(e && e.message || e) }); }
+  }
+
   // pull recent WhatsApp messages from Google Drive and inject as a messages dataset
   const [msgSync, setMsgSync] = useState({ state: "idle", info: null });
   const MSG_COLS = ["intent", "brand", "model", "reference", "price", "messageBody", "timestamp", "sender", "chat"];
@@ -1673,7 +1694,7 @@ export default function WatchBI() {
         )}
       </div>
 
-      {stage === "upload" && <UploadView fileRef={fileRef} onFiles={handleFiles} err={err} />}
+      {stage === "upload" && <UploadView fileRef={fileRef} onFiles={handleFiles} err={err} onLoadWatchOps={loadWatchOpsInventory} invSync={invSync} />}
       {stage === "map" && (
         <MapView datasets={datasets} setRole={setRole} setMap={setMap} removeDs={removeDs}
           onBuild={() => setStage("dash")} onAdd={() => fileRef.current?.click()} fileRef={fileRef} onFiles={handleFiles} />
@@ -1684,8 +1705,9 @@ export default function WatchBI() {
 }
 
 /* ---------- upload ---------- */
-function UploadView({ fileRef, onFiles, err }) {
+function UploadView({ fileRef, onFiles, err, onLoadWatchOps, invSync }) {
   const [drag, setDrag] = useState(false);
+  const loadingInv = invSync && invSync.state === "loading";
   return (
     <div className="p-8 flex flex-col items-center" style={{ minHeight: 480, justifyContent: "center" }}>
       <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
@@ -1713,6 +1735,24 @@ function UploadView({ fileRef, onFiles, err }) {
         </div>
         <div style={{ color: C.faint }} className="text-xs">.xlsx · .xls · .csv · multiple files & sheets supported</div>
       </div>
+
+      {onLoadWatchOps && (
+        <div className="flex flex-col items-center gap-2 mt-5" style={{ width: "100%", maxWidth: 560 }}>
+          <div className="flex items-center gap-3 w-full">
+            <div style={{ flex: 1, height: 1, background: C.line }} />
+            <span style={{ color: C.faint, fontFamily: SANS }} className="text-xs">or pull it live</span>
+            <div style={{ flex: 1, height: 1, background: C.line }} />
+          </div>
+          <button onClick={onLoadWatchOps} disabled={loadingInv}
+            style={{ background: loadingInv ? C.line : C.panel2, color: loadingInv ? C.faint : C.gold, border: `1px solid ${C.gold}`, borderRadius: 12, fontFamily: SANS }}
+            className="px-5 py-2.5 text-sm flex items-center gap-2">
+            {loadingInv ? "Loading inventory…" : "Load inventory from WatchOps"}
+          </button>
+          {invSync && invSync.state === "error" && <span style={{ color: C.red, fontFamily: SANS }} className="text-xs">{String(invSync.info)}</span>}
+          <span style={{ color: C.faint, fontFamily: SANS }} className="text-xs text-center">Pulls your current holdings from WatchOps; add a sales export on the next screen.</span>
+        </div>
+      )}
+
       <div style={{ color: C.faint }} className="text-xs mt-6 max-w-md text-center">
         The tool detects your columns and lets you confirm the mapping, so it works on any dealer's export — not just one fixed format.
       </div>

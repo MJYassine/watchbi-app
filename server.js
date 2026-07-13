@@ -171,6 +171,60 @@ app.post("/api/market", async (req, res) => {
   res.json({ results });
 });
 
+/* ---------- WatchOps: pull the dealer's live inventory (holdings) ---------- */
+const WO_TOKEN = process.env.WATCHOPS_TOKEN;
+const WO_BASE = "https://api.watchops.com/v1";
+const woNum = (v) => { const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g, "")); return isNaN(n) ? null : n; };
+// WatchOps condition codes -> New/Used text (best-effort; refine with their legend)
+const WO_CONDITION = { 1: "New", 2: "Unworn", 3: "Mint", 4: "Used", 5: "Used" };
+function mapWoItem(x) {
+  const pa = x.prodattr || {};
+  const paid = x.purchase_invoice_paid;
+  const isMemo = x.memoid != null;
+  return {
+    brand: x.brandname || null,
+    modelName: pa.model || x.inventory_title || null,
+    modelNumber: pa.reference || null,
+    cost: woNum(x.total_cost) ?? woNum(x.purchaseprice),
+    purchaseDate: x.purchasedate || null,
+    targetWholesale: woNum(x.targetwholesaleprice),
+    targetEndCustomer: woNum(x.targetendcustomerprice),
+    tagPrice: woNum(x.tag_price),
+    condition: x.condition != null ? (WO_CONDITION[x.condition] || String(x.condition)) : null,
+    status: x.status || null,
+    invType: isMemo ? "Memo" : "Owned",
+    paymentStatus: paid === true ? "Paid" : paid === false ? "Unpaid" : null,
+    supplier: x.purchasefrom || null,
+    serial: x.serialno || null,
+  };
+}
+let _invCache = null;
+app.get("/api/inventory", async (req, res) => {
+  if (!WO_TOKEN) return res.status(500).json({ error: "WATCHOPS_TOKEN not set" });
+  if (_invCache && Date.now() - _invCache.at < 30 * 60 * 1000 && !req.query.force) return res.json(_invCache.payload);
+  try {
+    const limit = 250; let page = 1, all = [], total = Infinity, totalCost = null;
+    while (all.length < total && page <= 40) {
+      const r = await fetch(`${WO_BASE}/inventories`, {
+        method: "POST", headers: { Authorization: `Bearer ${WO_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "ALL", type: "ALL", limit, page_no: page }),
+      });
+      const j = await r.json();
+      if (!j || j.success !== 1 || !Array.isArray(j.data)) break;
+      if (page === 1) { total = parseInt(j.totalInventory || "0", 10) || j.data.length; totalCost = woNum(j.totalCost); }
+      all = all.concat(j.data);
+      if (j.data.length < limit) break;
+      page++;
+    }
+    const rows = all.filter((x) => !x.sold).map(mapWoItem);
+    const payload = { rows, count: rows.length, total, totalCost };
+    _invCache = { at: Date.now(), payload };
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // serve the built frontend (created by `npm run build`) in production
 const distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
