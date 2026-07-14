@@ -476,6 +476,8 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         supplier: (r[m.supplier] && String(r[m.supplier]).trim()) || null,
       };
     });
+    // drop fully-blank watches (no brand AND no model name) from everything
+    items = items.filter((x) => x.chartName != null);
     // collect all statuses before filtering so the filter UI can show all options
     out.invStatuses = [...new Set(items.map((x) => x.status).filter(Boolean))].sort();
     // drop excluded models from every inventory total
@@ -709,6 +711,8 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         customer: (r[m.customer] && String(r[m.customer]).trim()) || null,
       };
     });
+    // drop fully-blank watches (no brand AND no model name) from everything
+    rows = rows.filter((x) => x.chartName != null);
     // full mapped set (before the period window) — liabilities reflect all invoices
     const fullSalesRows = rows;
 
