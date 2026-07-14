@@ -3306,19 +3306,29 @@ function BuyHierarchy({ brands }) {
    (one unit each, down the ranking) using projected cost = avg historical total cost */
 function FundingScenarios({ pool }) {
   const [budget, setBudget] = useState(50000);
+  const [excluded, setExcluded] = useState(() => new Set());
   const priced = (pool || []).filter((m) => m.avgCost && m.avgCost > 0);
+  const keyOf = (m) => m.ref || ((m.brand || "") + "|" + (m.model || ""));
+  // clear exclusions if the underlying pool changes (e.g. brand filter)
+  const poolKey = priced.map(keyOf).join(",");
+  useEffect(() => { setExcluded(new Set()); }, [poolKey]);
+  // greedy: one unit per model down the ranking, skipping anything excluded — the
+  // freed budget automatically pulls the next affordable watches in
   let remaining = budget;
   const picks = [];
   for (const m of priced) {
+    if (excluded.has(keyOf(m))) continue;
     if (m.avgCost <= remaining) { picks.push(m); remaining -= m.avgCost; }
   }
   const spent = budget - remaining;
+  const excludedList = priced.filter((m) => excluded.has(keyOf(m)));
   const presets = [20000, 50000, 100000];
   return (
     <div className="flex flex-col gap-3">
       <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12 }}>
         Pick a budget and we'll spread it across the highest buy-score watches — one unit each down the ranking — using each
         model's projected cost (its average historical total cost). This avoids dumping the whole budget into one reference.
+        Can't actually get one? Hit <b>Exclude</b> and the budget re-spreads into the next best watches.
       </div>
       <div className="flex flex-wrap items-center gap-2">
         {presets.map((p) => (
@@ -3343,10 +3353,32 @@ function FundingScenarios({ pool }) {
       </div>
       {picks.length === 0
         ? <Locked msg={priced.length === 0 ? "No models have a cost basis yet (need historical sales cost)." : "Budget too small for even the cheapest ranked watch."} />
-        : <ItemTable rows={picks} cols={[
+        : <ItemTable rows={picks} getRowKey={keyOf} cols={[
             ["brand","Brand"],["model","Model"],["ref","Ref #"],["avgCost","Proj. cost",fmtMoney],
             ["avgProfit","Avg profit",fmtMoney],["soldCount","Times sold"],["stock","In stock"],
+            ["__x","",(_, r) => (
+              <button onClick={() => setExcluded((prev) => new Set(prev).add(keyOf(r)))}
+                style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: C.dim, whiteSpace: "nowrap" }}
+                className="px-3 py-1">Exclude</button>
+            )],
           ]} />}
+
+      {excludedList.length > 0 && (
+        <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }} className="mt-1">
+          <div className="mb-1">Excluded (click to put back):</div>
+          <div className="flex flex-wrap gap-2">
+            {excludedList.map((m) => (
+              <button key={keyOf(m)}
+                onClick={() => setExcluded((prev) => { const n = new Set(prev); n.delete(keyOf(m)); return n; })}
+                style={{ fontFamily: SANS, fontSize: 12, borderRadius: 999, border: `1px solid ${C.line}`, background: "transparent", color: C.dim }}
+                className="px-3 py-1">{m.brand} — {m.model || m.ref} ✕</button>
+            ))}
+            <button onClick={() => setExcluded(new Set())}
+              style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: C.gold }}
+              className="px-3 py-1">Reset all</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
