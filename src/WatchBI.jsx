@@ -1131,7 +1131,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
   // ── funding pool: every model we've traded (all-time) with a cost basis, ranked by
   //    demand × profit, so a budget can be spread across many real options ──
   out.fundingModels = Object.values(out.refPositions)
-    .filter((p) => p.medianCost && p.medianCost > 0 && p.soldCount >= 1)
+    .filter((p) => p.medianCost && p.medianCost > 0 && p.soldCount >= 1 && (p.brand || p.model))
     .map((p) => {
       const unitProfit = (p.medianSale && p.medianSale > p.medianCost) ? p.medianSale - p.medianCost : 0;
       return {
