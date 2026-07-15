@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Horometrics — WatchBI</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* keep the page dark all the way down — otherwise any area below the app
+         (short content, overscroll) shows the browser's white background */
+      html, body { margin: 0; background: #15120e; min-height: 100%; }
+      #root { min-height: 100vh; background: #15120e; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

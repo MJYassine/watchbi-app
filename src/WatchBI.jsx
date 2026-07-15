@@ -294,39 +294,40 @@ function qotGrade(target, market) {
   if (d <= 3) return "A"; if (d <= 8) return "B"; if (d <= 15) return "C"; return "D";
 }
 
-/* DJ's grade (single sale): a points system per DJ Allen — "each data point is 1 point."
-   Scores Margin, Days-on-hand, and Gross-profit-$, each A=4..D=1, averaged → A/B/C/D.
-   Averaging resolves conflicting factors (e.g. A-margin / D-days). All thresholds are
-   configurable per dealer (this DJ_GRADE_CFG is DJ's default set — to be fine-tuned). */
-const DJ_GRADE_CFG = {
-  margin: { A: 30, B: 20, C: 10 },      // GP% (profit/cost), higher better
-  days: { A: 30, B: 60, C: 120 },       // days on hand, lower better
-  profit: { A: 5000, B: 2500, C: 1000 },// gross profit $, higher better
-  weights: { margin: 1, days: 1, profit: 1 },
+/* Performance grade (single sale) — points system per DJ Allen's "each data point is
+   1 point". Two factors: Margin and Velocity (days on hand), each scored A=4..D=1,
+   then a weighted average → A/B/C/D. Averaging resolves conflicting factors
+   (e.g. A-margin / D-days). Weighting and harshness are dealer-configurable.
+
+     score = (marginPts * Wmargin + daysPts * Wvelocity) / (Wmargin + Wvelocity)
+     shift = ((harshness - 50) / 50) * 0.5
+     grade = A if score >= 3.5+shift, B if >= 2.5+shift, C if >= 1.5+shift, else D  */
+const GRADE_DEFAULTS = {
+  margin: { A: 30, B: 20, C: 10 },   // GP% (profit/cost), higher is better
+  days: { A: 30, B: 60, C: 120 },    // days on hand, lower is better
+  marginWeight: 50,                  // 0-100; velocity weight = 100 - marginWeight
+  harshness: 50,                     // 0-100; 50 = standard cutoffs
 };
 function factorPoints(value, bands, higherBetter) {
   if (value == null || isNaN(value)) return null;
   if (higherBetter) return value >= bands.A ? 4 : value >= bands.B ? 3 : value >= bands.C ? 2 : 1;
   return value <= bands.A ? 4 : value <= bands.B ? 3 : value <= bands.C ? 2 : 1;
 }
-function ptsToGrade(avg) {
-  if (avg == null) return null;
-  return avg >= 3.5 ? "A" : avg >= 2.5 ? "B" : avg >= 1.5 ? "C" : "D";
+// weighted score (1..4) for one sale; null when neither factor is available
+function saleScore(sale, cfg = GRADE_DEFAULTS) {
+  const mp = factorPoints(sale.marginPct, cfg.margin, true);
+  const dp = factorPoints(sale.days, cfg.days, false);
+  const wM = cfg.marginWeight, wD = 100 - cfg.marginWeight;
+  let sum = 0, w = 0;
+  if (mp != null && wM > 0) { sum += mp * wM; w += wM; }
+  if (dp != null && wD > 0) { sum += dp * wD; w += wD; }
+  if (!w) return null;
+  return sum / w;
 }
-// sale = { marginPct, days, profit }; returns { grade, points, parts }
-function djSaleGrade(sale, cfg = DJ_GRADE_CFG) {
-  const parts = {
-    margin: factorPoints(sale.marginPct, cfg.margin, true),
-    days: factorPoints(sale.days, cfg.days, false),
-    profit: factorPoints(sale.profit, cfg.profit, true),
-  };
-  let sum = 0, wsum = 0;
-  for (const k of ["margin", "days", "profit"]) {
-    if (parts[k] != null) { sum += parts[k] * cfg.weights[k]; wsum += cfg.weights[k]; }
-  }
-  if (!wsum) return { grade: null, points: null, parts };
-  const avg = sum / wsum;
-  return { grade: ptsToGrade(avg), points: +avg.toFixed(2), parts };
+function scoreToGrade(score, cfg = GRADE_DEFAULTS) {
+  if (score == null) return null;
+  const shift = ((cfg.harshness - 50) / 50) * 0.5;
+  return score >= 3.5 + shift ? "A" : score >= 2.5 + shift ? "B" : score >= 1.5 + shift ? "C" : "D";
 }
 
 function normalizeBrand(b) {
@@ -837,29 +838,24 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     allSalesRows.forEach((x) => {
       if (!x.salesperson) return;
       const k = x.salesperson;
-      bperson[k] = bperson[k] || { salesperson: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [], _pts: [], sales: [] };
+      bperson[k] = bperson[k] || { salesperson: k, units: 0, profit: 0, revenue: 0, cost: 0, _days: [], _m: [], sales: [] };
       bperson[k].units++; bperson[k].profit += x.profit; bperson[k].revenue += x.price; bperson[k].cost += x.cost;
       if (x.days != null) bperson[k]._days.push(x.days);
       if (x.marginPct != null) bperson[k]._m.push(x.marginPct);
-      const dj = djSaleGrade({ marginPct: x.marginPct, days: x.days, profit: x.profit });
-      if (dj.points != null) bperson[k]._pts.push(dj.points);
+      // raw fields only — the grade itself is computed in the UI so the grading
+      // sliders can re-score instantly without recomputing all metrics
       bperson[k].sales.push({
         saleDate: x.saleDate, brand: x.brand, model: x.chartName || x.modelName, reference: x.modelNumber,
         price: x.price, cost: x.cost, profit: x.profit, marginPct: x.marginPct, days: x.days,
-        djGrade: dj.grade, djPoints: dj.points,
       });
     });
-    out.salesByPerson = Object.values(bperson).map((b) => {
-      const avgPts = b._pts.length ? b._pts.reduce((s, v) => s + v, 0) / b._pts.length : null;
-      return {
-        salesperson: b.salesperson, units: b.units, profit: b.profit, revenue: b.revenue,
-        avgProfit: b.units ? b.profit / b.units : null,
-        profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
-        medianDays: median(b._days), medianMargin: median(b._m),
-        djGrade: ptsToGrade(avgPts), djPoints: avgPts != null ? +avgPts.toFixed(2) : null,
-        sales: b.sales.sort((a, c) => (c.saleDate || 0) - (a.saleDate || 0)),
-      };
-    }).sort((a, b) => b.profit - a.profit);
+    out.salesByPerson = Object.values(bperson).map((b) => ({
+      salesperson: b.salesperson, units: b.units, profit: b.profit, revenue: b.revenue,
+      avgProfit: b.units ? b.profit / b.units : null,
+      profitPct: b.cost ? (b.profit / b.cost) * 100 : null,
+      medianDays: median(b._days), medianMargin: median(b._m),
+      sales: b.sales.sort((a, c) => (c.saleDate || 0) - (a.saleDate || 0)),
+    })).sort((a, b) => b.profit - a.profit);
     out.hasSalesperson = allSalesRows.some((x) => x.salesperson);
 
     // by type (always available)
@@ -1703,7 +1699,7 @@ export default function WatchBI() {
   const metrics = (hasExcl && exclScope === "dashboard") ? metricsExcl : metricsFull;
 
   return (
-    <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 600 }} className="w-full">
+    <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: "100vh" }} className="w-full">
       {/* header */}
       <div style={{ borderBottom: `1px solid ${C.line}` }} className="px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -2190,6 +2186,64 @@ function LatestMarketTable({ rows }) {
         ["salesGrade","Grade",(v) => <GradeBadge grade={v} />],
       ]} />
     </>
+  );
+}
+
+/* Grading configuration — weight margin vs velocity, and how harsh the cutoffs are.
+   Defaults match the agreed baseline; each dealer can tune their own. */
+function GradingConfig({ cfg, onChange }) {
+  const [open, setOpen] = useState(false);
+  const set = (k, v) => onChange({ ...cfg, [k]: v });
+  const shift = ((cfg.harshness - 50) / 50) * 0.5;
+  const harshLabel = cfg.harshness < 34 ? "Lenient" : cfg.harshness > 66 ? "Harsh" : "Standard";
+  return (
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.panel2 }} className="p-3 mt-3">
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ fontFamily: SANS, fontSize: 12, color: C.gold, background: "transparent", border: "none" }}
+        className="flex items-center gap-2">
+        <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
+        Grading configuration
+        <span style={{ color: C.faint }}>
+          · {cfg.marginWeight}% margin / {100 - cfg.marginWeight}% velocity · {harshLabel}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-3 flex flex-col gap-4">
+          <div>
+            <div className="flex justify-between" style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>
+              <span>Margin <b style={{ color: C.gold }}>{cfg.marginWeight}%</b></span>
+              <span>Velocity <b style={{ color: C.gold }}>{100 - cfg.marginWeight}%</b></span>
+            </div>
+            <input type="range" min={0} max={100} step={5} value={cfg.marginWeight}
+              onChange={(e) => set("marginWeight", parseInt(e.target.value, 10))}
+              style={{ width: "100%", accentColor: C.gold }} />
+            <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
+              How much the grade leans on profit margin vs how fast the watch sold.
+            </div>
+          </div>
+          <div>
+            <div className="flex justify-between" style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>
+              <span>Harshness <b style={{ color: C.gold }}>{harshLabel}</b></span>
+              <span style={{ color: C.faint }}>A needs ≥ {(3.5 + shift).toFixed(2)} pts</span>
+            </div>
+            <input type="range" min={0} max={100} step={5} value={cfg.harshness}
+              onChange={(e) => set("harshness", parseInt(e.target.value, 10))}
+              style={{ width: "100%", accentColor: C.gold }} />
+            <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }}>
+              Raises or lowers the bar for every letter. Harsher = fewer A's.
+            </div>
+          </div>
+          <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+            Each sale scores <b>Margin</b> (A ≥{cfg.margin.A}% · B ≥{cfg.margin.B}% · C ≥{cfg.margin.C}%) and
+            {" "}<b>Velocity</b> (A ≤{cfg.days.A}d · B ≤{cfg.days.B}d · C ≤{cfg.days.C}d) as 4/3/2/1 points,
+            then the weighted average sets the letter.
+            <button onClick={() => onChange(GRADE_DEFAULTS)}
+              style={{ marginLeft: 8, fontFamily: SANS, fontSize: 11, color: C.gold, background: "transparent", border: `1px solid ${C.line}`, borderRadius: 6 }}
+              className="px-2 py-0.5">Reset</button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2800,6 +2854,18 @@ function SalesTab({ M, filters }) {
   const [expandedBrand, setExpandedBrand] = useState(null);
   const [expandedVelBrand, setExpandedVelBrand] = useState(null);
   const [expandedPerson, setExpandedPerson] = useState(null);
+  // dealer-configurable grading (margin vs velocity weight, and how harsh the cutoffs are)
+  const [gradeCfg, setGradeCfg] = useState(GRADE_DEFAULTS);
+  // score each salesperson's sales with the current config, and average for their grade
+  const gradedPeople = (M.salesByPerson || []).map((p) => {
+    const sales = (p.sales || []).map((s) => {
+      const score = saleScore(s, gradeCfg);
+      return { ...s, score, grade: scoreToGrade(score, gradeCfg) };
+    });
+    const pts = sales.map((s) => s.score).filter((v) => v != null);
+    const avg = pts.length ? pts.reduce((a, b) => a + b, 0) / pts.length : null;
+    return { ...p, sales, avgScore: avg != null ? +avg.toFixed(2) : null, grade: scoreToGrade(avg, gradeCfg) };
+  });
   const lineTableRef = useRef(null);
   const handleLineBarClick = (data) => {
     const line = data?.payload?.line ?? data?.line;
@@ -2933,11 +2999,13 @@ function SalesTab({ M, filters }) {
                 </ResponsiveContainer>
               </div>
             </div>
+            <GradingConfig cfg={gradeCfg} onChange={setGradeCfg} />
+
             <div className="mt-3">
               <div style={{ color: C.faint, fontFamily: SANS, fontSize: 11 }} className="mb-1">
-                Click a salesperson to see each sale they made, graded by <b>DJ's grade</b> (margin + days-on-hand + gross profit). Their letter is the average across their sales.
+                Click a salesperson to see each sale they made, each given a <b>performance grade</b>. Their letter is the average across their sales.
               </div>
-              <ItemTable rows={M.salesByPerson}
+              <ItemTable rows={gradedPeople}
                 getRowKey={(r) => r.salesperson}
                 expandedKey={expandedPerson}
                 onRowClick={(r) => setExpandedPerson((p) => p === r.salesperson ? null : r.salesperson)}
@@ -2945,21 +3013,21 @@ function SalesTab({ M, filters }) {
                   (r.sales && r.sales.length) ? (
                     <div>
                       <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
-                        {r.salesperson} — {r.sales.length} sales · avg DJ grade <GradeBadge grade={r.djGrade} /> {r.djPoints != null ? `(${r.djPoints})` : ""}
+                        {r.salesperson} — {r.sales.length} sales · avg grade <GradeBadge grade={r.grade} /> {r.avgScore != null ? `(${r.avgScore})` : ""}
                       </div>
                       <ItemTable rows={r.sales.slice(0, 200)} cols={[
                         ["saleDate","Date",(v) => v ? new Date(v).toISOString().slice(0, 10) : "—"],
                         ["brand","Brand"],["model","Model"],["reference","Ref #"],
                         ["price","Sold for",fmtMoney],["profit","Profit $",fmtMoney],
                         ["marginPct","Margin %",(v) => fmtPct(v)],["days","Days on hand"],
-                        ["djGrade","DJ grade",(v) => <GradeBadge grade={v} />],
+                        ["grade","Grade",(v) => <GradeBadge grade={v} />],
                       ]} />
                     </div>
                   ) : <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No individual sales recorded.</div>
                 )}
                 cols={[
                   ["salesperson","Salesperson"],
-                  ["djGrade","DJ grade",(v) => <GradeBadge grade={v} />],
+                  ["grade","Grade",(v) => <GradeBadge grade={v} />],
                   ["units","Units"],
                   ["revenue","Sales $",fmtMoney],["profit","Profit $",fmtMoney],
                   ["profitPct","Margin %",fmtPct],["medianDays","Velocity (median days)"],
@@ -3312,15 +3380,32 @@ function FundingScenarios({ pool }) {
   // clear exclusions if the underlying pool changes (e.g. brand filter)
   const poolKey = priced.map(keyOf).join(",");
   useEffect(() => { setExcluded(new Set()); }, [poolKey]);
-  // greedy: one unit per model down the ranking, skipping anything excluded — the
-  // freed budget automatically pulls the next affordable watches in
+  // Allocation: walk the ranking and take ONE unit of each affordable watch, then
+  // repeat — so the budget spreads across many models first and only doubles up once
+  // everything's had a turn. Capped at MAX_QTY per model so it never dumps the whole
+  // budget into one reference. Excluded watches are skipped and their budget re-spread.
+  const MAX_QTY = 3;
   let remaining = budget;
-  const picks = [];
-  for (const m of priced) {
-    if (excluded.has(keyOf(m))) continue;
-    if (m.avgCost <= remaining) { picks.push(m); remaining -= m.avgCost; }
+  const chosen = new Map(); // key -> { m, n }
+  for (let pass = 0; pass < MAX_QTY; pass++) {
+    let bought = false;
+    for (const m of priced) {
+      const k = keyOf(m);
+      if (excluded.has(k)) continue;
+      const cur = chosen.get(k);
+      if ((cur ? cur.n : 0) >= MAX_QTY) continue;
+      if (m.avgCost <= remaining) {
+        if (cur) cur.n++; else chosen.set(k, { m, n: 1 });
+        remaining -= m.avgCost; bought = true;
+      }
+    }
+    if (!bought) break; // nothing else fits
   }
+  const picks = [...chosen.values()].map(({ m, n }) => ({
+    ...m, qty: n, lineCost: m.avgCost * n, lineProfit: (m.avgProfit || 0) * n,
+  }));
   const spent = budget - remaining;
+  const units = picks.reduce((s, p) => s + p.qty, 0);
   const excludedList = priced.filter((m) => excluded.has(keyOf(m)));
   const presets = [20000, 50000, 100000];
   return (
@@ -3346,16 +3431,30 @@ function FundingScenarios({ pool }) {
         </span>
       </div>
       <div className="flex flex-wrap gap-3">
-        <Stat label="Watches to buy" value={picks.length} />
+        <Stat label="Watches to buy" value={units} sub={`${picks.length} different models`} />
         <Stat label="Projected spend" value={fmtMoney(spent)} sub={`of ${fmtMoney(budget)} budget`} />
         <Stat label="Left over" value={fmtMoney(remaining)} sub="too small for the next pick" />
-        <Stat label="Projected profit" value={fmtMoney(picks.reduce((s, m) => s + (m.avgProfit || 0), 0))} sub="if each sells at avg profit" />
+        <Stat label="Projected profit" value={fmtMoney(picks.reduce((s, m) => s + m.lineProfit, 0))} sub="if each sells at its usual profit" />
       </div>
+
+      <details style={{ border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel2 }} className="p-3">
+        <summary style={{ color: C.gold, fontFamily: SANS, fontSize: 12, cursor: "pointer" }}>How these watches were picked</summary>
+        <ol style={{ color: C.dim, fontFamily: SANS, fontSize: 12 }} className="mt-2 flex flex-col gap-1.5 pl-4 list-decimal">
+          <li><b>Candidates:</b> every model you've actually sold before that has a cost basis (currently {priced.length} models). Anything you've never traded is ignored — we have no cost to predict.</li>
+          <li><b>Ranked by:</b> total historical profit contribution = <i>times sold × your usual profit per unit</i>. Proven movers that make real money float to the top.</li>
+          <li><b>Projected cost:</b> the <i>median</i> of what you've actually paid for that reference historically — not a market price.</li>
+          <li><b>Allocation:</b> walk the ranking and take <b>one</b> of each watch you can still afford, then repeat. That spreads the budget wide before doubling up (max {MAX_QTY} of any one reference).</li>
+          <li><b>Exclude</b> anything you can't really get — its budget is freed and immediately re-spread into the next best watches.</li>
+        </ol>
+      </details>
+
       {picks.length === 0
         ? <Locked msg={priced.length === 0 ? "No models have a cost basis yet (need historical sales cost)." : "Budget too small for even the cheapest ranked watch."} />
         : <ItemTable rows={picks} getRowKey={keyOf} cols={[
-            ["brand","Brand"],["model","Model"],["ref","Ref #"],["avgCost","Proj. cost",fmtMoney],
-            ["avgProfit","Avg profit",fmtMoney],["soldCount","Times sold"],["stock","In stock"],
+            ["qty","Qty",(v) => <b style={{ color: C.gold }}>{v}×</b>],
+            ["brand","Brand"],["model","Model"],["ref","Ref #"],
+            ["avgCost","Cost each",fmtMoney],["lineCost","Total cost",fmtMoney],
+            ["lineProfit","Proj. profit",fmtMoney],["soldCount","Times sold"],["stock","In stock"],
             ["__x","",(_, r) => (
               <button onClick={() => setExcluded((prev) => new Set(prev).add(keyOf(r)))}
                 style={{ fontFamily: SANS, fontSize: 12, borderRadius: 8, border: `1px solid ${C.line}`, background: "transparent", color: C.dim, whiteSpace: "nowrap" }}

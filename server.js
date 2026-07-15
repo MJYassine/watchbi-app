@@ -12,6 +12,24 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+/* ---------- password gate ----------
+   Set APP_PASSWORD (and optionally APP_USER, default "admin") to lock the whole
+   site — pages and APIs. Unset = wide open, so local dev needs no config. */
+const APP_PASSWORD = process.env.APP_PASSWORD;
+const APP_USER = process.env.APP_USER || "admin";
+if (APP_PASSWORD) {
+  app.use((req, res, next) => {
+    const hdr = req.headers.authorization || "";
+    if (hdr.startsWith("Basic ")) {
+      const [user, ...rest] = Buffer.from(hdr.slice(6), "base64").toString().split(":");
+      // constant-ish comparison; fine for a single shared password
+      if (user === APP_USER && rest.join(":") === APP_PASSWORD) return next();
+    }
+    res.set("WWW-Authenticate", 'Basic realm="Horometrics", charset="UTF-8"');
+    return res.status(401).send("Authentication required");
+  });
+}
+
 /* ---------- Google Drive: pull recent WhatsApp message sheets ---------- */
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 // returns { creds } or { error } so the endpoint can report exactly what's wrong
@@ -68,7 +86,9 @@ function normalizeMsgRow(r) {
     model: g("model"),
     reference: g("fullReferenceNumber", "reference", "referenceNumber"),
     price: g("price"),
-    messageBody: g("messageBody", "body"),
+    // trim: the UI shows ~90 chars and the price check scans the first few numbers.
+    // full bodies across thousands of messages are a large chunk of the heap.
+    messageBody: String(g("messageBody", "body") ?? "").slice(0, 300) || null,
     timestamp: g("timestamp", "date"),
     sender: g("senderName", "sender"),
     chat: g("chatName", "chat"),
@@ -90,14 +110,15 @@ async function fetchFileRows(token, file) {
   return csvToObjects(await r.text());
 }
 
-const _msgCache = {}; // days -> { at, payload }
+// single-entry cache — one payload only. keying by `days` kept a full copy per
+// distinct value, which grew the heap without bound.
+let _msgCache = null; // { days, at, payload }
 const MSG_TTL = 30 * 60 * 1000; // 30 min — the folder updates once a day
 app.get("/api/messages", async (req, res) => {
   const g = getDriveAuth();
   if (g.error) return res.status(500).json({ error: g.error });
   const days = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 4));
-  const cached = _msgCache[days];
-  if (cached && Date.now() - cached.at < MSG_TTL && !req.query.force) return res.json(cached.payload);
+  if (_msgCache && _msgCache.days === days && Date.now() - _msgCache.at < MSG_TTL && !req.query.force) return res.json(_msgCache.payload);
   try {
     const token = await driveToken(g.client);
     if (!token) return res.status(502).json({ error: "Google auth failed (check the service-account key)" });
@@ -134,7 +155,7 @@ app.get("/api/messages", async (req, res) => {
       } catch { /* skip a bad file */ }
     }
     const payload = { rows, files: recent.map((f) => f.name), latest, days };
-    _msgCache[days] = { at: Date.now(), payload };
+    _msgCache = { days, at: Date.now(), payload }; // replaces any previous payload
     res.json(payload);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -234,8 +255,13 @@ app.get("/api/inventory", async (req, res) => {
   if (!WO_TOKEN) return res.status(500).json({ error: "WATCHOPS_TOKEN not set" });
   if (_invCache && Date.now() - _invCache.at < 30 * 60 * 1000 && !req.query.force) return res.json(_invCache.payload);
   try {
-    const limit = 250; let page = 1, all = [], total = Infinity, totalCost = null;
-    while (all.length < total && page <= 40) {
+    // exclude sold and voided items — keep only live, valid holdings
+    const isVoided = (x) => /void/i.test(String(x.status || "")) || x.voidreason != null || x.purchase_voidreason != null;
+    // map+filter each page as it arrives and drop the raw payload — holding all
+    // 2,600 raw records (with prodattr/images) just to return ~180 costs ~60MB
+    const limit = 250; let page = 1, fetched = 0, total = Infinity, totalCost = null;
+    const rows = [];
+    while (fetched < total && page <= 40) {
       const r = await fetch(`${WO_BASE}/inventories`, {
         method: "POST", headers: { Authorization: `Bearer ${WO_TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify({ status: "ALL", type: "ALL", limit, page_no: page }),
@@ -245,13 +271,12 @@ app.get("/api/inventory", async (req, res) => {
       const j = await r.json();
       if (!j || j.success !== 1 || !Array.isArray(j.data)) { if (page === 1) return res.status(502).json({ error: "WatchOps returned no data (check the token)" }); break; }
       if (page === 1) { total = parseInt(j.totalInventory || "0", 10) || j.data.length; totalCost = woNum(j.totalCost); }
-      all = all.concat(j.data);
-      if (j.data.length < limit) break;
+      const n = j.data.length;
+      for (const x of j.data) { if (!x.sold && !isVoided(x)) rows.push(mapWoItem(x)); }
+      fetched += n;
+      if (n < limit) break;
       page++;
     }
-    // exclude sold and voided items — keep only live, valid holdings
-    const isVoided = (x) => /void/i.test(String(x.status || "")) || x.voidreason != null || x.purchase_voidreason != null;
-    const rows = all.filter((x) => !x.sold && !isVoided(x)).map(mapWoItem);
     const payload = { rows, count: rows.length, total, totalCost };
     _invCache = { at: Date.now(), payload };
     res.json(payload);

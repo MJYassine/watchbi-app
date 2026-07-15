@@ -4,10 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "node server.js",
-    "start": "concurrently \"npm run server\" \"npm run dev\"",
+    "server": "node --max-old-space-size=384 server.js",
+    "start": "node --max-old-space-size=384 server.js",
     "build": "vite build",
-    "preview-prod": "node server.js"
+    "preview-prod": "node --max-old-space-size=384 server.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
