@@ -173,7 +173,8 @@ function normalizeCondition(v) {
   if (v == null || v === "") return "Unspecified";
   const s = String(v).trim().toLowerCase();
   if (!s) return "Unspecified";
-  if (s.includes("new")) return "New";
+  // "like new" / "as new" describe a used watch — they must not match the "new" test below
+  if (s.includes("new") && !/\b(like|as)\s+new\b/.test(s)) return "New";
   if (s.includes("used") || s.includes("pre-owned") || s.includes("preowned") || s.includes("pre owned") || s.includes("second")) return "Used";
   return String(v).trim().replace(/\b\w/g, (m) => m.toUpperCase());
 }
@@ -201,7 +202,7 @@ function modelKeyOf(modelNumber, modelName) {
 function conditionRank(c) {
   const s = String(c || "").toLowerCase();
   if (s === "new") return 0;
-  if (s.includes("mint") || s.includes("excellent") || s.includes("very good")) return 1;
+  if (s.includes("mint") || s.includes("excellent") || s.includes("very good") || s.includes("like new") || s.includes("retail ready")) return 1;
   if (s.includes("good")) return 2;
   if (s.includes("used") || s.includes("fair")) return 3;
   if (!s || s === "unspecified") return 99;
@@ -583,8 +584,10 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
     out.unpaidLiability = unpaid.reduce((s, x) => s + x.cost, 0);
     out.unpaidCount = unpaid.length;
 
-    // consignment: unsold consignment stock (everything in inventory is unsold), not voided
-    const consign = items.filter((x) => isConsignmentType(x.invType) && x.paymentStatus !== "Voided");
+    // consignment & memo: watches you hold but don't own outright (you owe when sold).
+    // covers text like "Consignment"/"Memo" from uploads and the "Memo" invType from WatchOps.
+    const isConsignOrMemo = (x) => isConsignmentType(x.invType) || isMemoType(x.invType);
+    const consign = items.filter((x) => isConsignOrMemo(x) && x.paymentStatus !== "Voided");
     out.consignmentItems = [...consign].sort((a, b) => b.cost - a.cost);
     out.consignmentLiability = consign.reduce((s, x) => s + x.cost, 0);
     out.consignmentCount = consign.length;
@@ -2410,7 +2413,7 @@ function LiabilitiesTab({ M }) {
       {/* KPI row */}
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))" }}>
         {M.hasInv && <Stat label="Unpaid inventory" value={fmtMoney(M.unpaidLiability)} sub={`${M.unpaidCount} watches · excl. memo & voided`} />}
-        {M.hasInv && <Stat label="Consignment" value={fmtMoney(M.consignmentLiability)} sub={`${M.consignmentCount} unsold`} />}
+        {M.hasInv && <Stat label="Consignment & memo" value={fmtMoney(M.consignmentLiability)} sub={`${M.consignmentCount} held, not owned`} />}
         {M.hasSales && <Stat label="Overpaid invoices" value={fmtMoney(M.overpaidLiability)} sub={`${M.overpaidCount} invoices owed back`} />}
         {M.hasSales && <Stat label="Sales tax (est.)" value={fmtMoney(M.salesTaxTotal)} sub="4 ruled states" />}
       </div>
@@ -2434,16 +2437,16 @@ function LiabilitiesTab({ M }) {
 
       {/* Consignment */}
       {M.hasInv && (
-        <Panel title="Consignment liability" note="unsold consignment inventory">
+        <Panel title="Consignment & memo liability" note="watches you hold but don't own — you owe on these when they sell">
           {!M.hasInvType
             ? <Locked msg="Add an 'Inventory type' column (Owned / Consignment / Memo) to your inventory export to track this." />
             : M.consignmentItems.length === 0
-            ? <div style={{ color: C.dim, fontFamily: SANS, fontSize: 13 }}>No consignment inventory on hand.</div>
+            ? <div style={{ color: C.dim, fontFamily: SANS, fontSize: 13 }}>No consignment or memo inventory on hand.</div>
             : (<>
-                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.consignmentLiability)} in consignment stock</div>
+                <div style={{ color: C.gold, fontFamily: SERIF }} className="text-2xl mb-3">{fmtMoney(M.consignmentLiability)} held on consignment / memo</div>
                 <ItemTable rows={M.consignmentItems} cols={[
                   ["brand","Brand"],["modelName","Model"],["modelNumber","Ref #"],
-                  ["age","Days in stock"],["cost","Cost",fmtMoney],
+                  ["invTypeLabel","Type"],["age","Days in stock"],["cost","Cost",fmtMoney],
                 ]} />
               </>)}
         </Panel>

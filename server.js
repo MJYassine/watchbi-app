@@ -227,8 +227,11 @@ app.post("/api/market", async (req, res) => {
 const WO_TOKEN = process.env.WATCHOPS_TOKEN;
 const WO_BASE = "https://api.watchops.com/v1";
 const woNum = (v) => { const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g, "")); return isNaN(n) ? null : n; };
-// WatchOps condition codes -> New/Used text (best-effort; refine with their legend)
-const WO_CONDITION = { 1: "New", 2: "Unworn", 3: "Mint", 4: "Used", 5: "Used" };
+// WatchOps condition codes -> the wording WatchOps' own xlsx export uses for the same item,
+// so API-sourced and sheet-sourced inventory share one vocabulary. Established by joining a
+// full export against this endpoint on INVENTORY ID (2,146/2,146 rows agreed, no ambiguity).
+// Code 5 is never observed; 10 behaves as a duplicate of 1.
+const WO_CONDITION = { 4: "New", 3: "Retail Ready/Like New", 2: "Mint/Very Good", 1: "Used/Good", 10: "Used/Good" };
 function mapWoItem(x) {
   const pa = x.prodattr || {};
   const paid = x.purchase_invoice_paid;
