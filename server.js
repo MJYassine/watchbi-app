@@ -232,10 +232,12 @@ const woNum = (v) => { const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g
 // full export against this endpoint on INVENTORY ID (2,146/2,146 rows agreed, no ambiguity).
 // Code 5 is never observed; 10 behaves as a duplicate of 1.
 const WO_CONDITION = { 4: "New", 3: "Retail Ready/Like New", 2: "Mint/Very Good", 1: "Used/Good", 10: "Used/Good" };
+// WatchOps inventorytype codes -> label (confirmed by joining a full xlsx export on
+// INVENTORY ID): 1 Regular/Owned · 2 Memo · 3 Partnership · 4 Consignment
+const WO_INVTYPE = { 1: "Owned", 2: "Memo", 3: "Partnership", 4: "Consignment" };
 function mapWoItem(x) {
   const pa = x.prodattr || {};
   const paid = x.purchase_invoice_paid;
-  const isMemo = x.memoid != null;
   return {
     brand: x.brandname || null,
     modelName: pa.model || x.inventory_title || null,
@@ -247,7 +249,7 @@ function mapWoItem(x) {
     tagPrice: woNum(x.tag_price),
     condition: x.condition != null ? (WO_CONDITION[x.condition] || String(x.condition)) : null,
     status: x.status || null,
-    invType: isMemo ? "Memo" : "Owned",
+    invType: WO_INVTYPE[x.inventorytype] || "Owned",
     paymentStatus: paid === true ? "Paid" : paid === false ? "Unpaid" : null,
     supplier: x.purchasefrom || null,
     serial: x.serialno || null,
