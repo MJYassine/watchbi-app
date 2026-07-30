@@ -72,7 +72,7 @@ const FIELDS = {
     ["shippingState", "Shipping state (optional)"], ["supplier", "Supplier / vendor (optional)"],
     ["salesperson", "Salesperson — created by (optional)"],
     ["amountOwed", "Amount owed / remaining balance (optional)"], ["customer", "Customer name (optional)"],
-    ["serial", "Serial # (optional)"],
+    ["warrantyDate", "Warranty date (optional)"], ["serial", "Serial # (optional)"],
   ],
   messages: [
     ["intent", "Intent (buy/sell)"], ["brand", "Brand"], ["model", "Model"],
@@ -100,6 +100,7 @@ function guessField(role, header) {
   if (has("brand")) return "brand";
   if (has("model name") || has("title item")) return "modelName";
   if (has("model number") || has("reference") || h === "ref") return "modelNumber";
+  if (has("warranty date") || has("warrantydate")) return "warrantyDate";
   if (has("condition")) return "condition";
   if (has("supplier") || has("vendor") || has("consignor") || has("bought from") || has("purchased from") || has("source")) return "supplier";
   if (has("payment") || has("paid")) return role === "inventory" ? "paymentStatus" : null;
@@ -688,10 +689,15 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       const sdt = toDate(r[m.saleDate]);
       let days = daysBetween(pd, sdt);
       if (days != null && (days < 0 || days > 2000)) days = null; // typo guard
+      const condition = normalizeCondition(r[m.condition]);
+      const warrantyDate = toDate(r[m.warrantyDate]);
       // some reference numbers are excluded from velocity/median math: drop their
       // days-to-sell so they never feed median/velocity, but keep the unit counted
       const velIgnored = isVelocityIgnored(r[m.modelNumber], r[m.modelName]);
-      if (velIgnored) days = null;
+      // a "New" watch with no warranty date has unreliable age data — exclude it from
+      // velocity / days-to-sell (but keep it in unit counts / totals)
+      const noWarranty = condition === "New" && !warrantyDate;
+      if (velIgnored || noWarranty) days = null;
       const presold = days != null && days >= 0 && days <= 2;
       const brandNorm = normalizeBrand(r[m.brand]);
       addModelOption(r[m.brand], r[m.modelNumber], r[m.modelName]);
@@ -706,7 +712,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         modelNumber: r[m.modelNumber] || null,
         modelKey: modelKeyOf(r[m.modelNumber], r[m.modelName]),
         type: r[m.inventoryType] || "Unspecified",
-        condition: normalizeCondition(r[m.condition]),
+        condition,
         priceTier: priceTierLabel(price),
         shippingState: (r[m.shippingState] && String(r[m.shippingState]).trim()) || "Unspecified",
         supplier: (r[m.supplier] && String(r[m.supplier]).trim()) || null,
@@ -2633,46 +2639,6 @@ function InventoryTab({ M, filters }) {
                 ["grade","Grade",(v) => <GradeBadge grade={v} />],
                 ["count","Items"],["cost","Cost tied up",fmtMoney],
               ]} />
-          </div>
-        </Panel>
-
-        <Panel title="Age of inventory" note="days stock held · click a bucket to see its watches">
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={M.aging} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <CartesianGrid stroke={C.line} vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: C.dim, fontSize: 11 }} />
-              <YAxis tick={{ fill: C.faint, fontSize: 11 }} />
-              <Tooltip {...chartTip} formatter={(v, n) => n === "Cost" ? fmtMoney(v) : v} />
-              <Bar dataKey="count" name="Items" radius={[4, 4, 0, 0]} cursor="pointer"
-                onClick={(d) => { const l = d?.payload?.label ?? d?.label; if (l) setExpandedAge((p) => p === l ? null : l); }}>
-                {M.aging.map((b, i) => <Cell key={i} fill={b.lo >= 91 ? C.red : b.lo >= 61 ? "#c8863a" : C.gold} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-          <div className="mt-3">
-            <ItemTable rows={M.aging}
-              getRowKey={(r) => r.label}
-              expandedKey={expandedAge}
-              onRowClick={(r) => setExpandedAge((p) => p === r.label ? null : r.label)}
-              renderExpanded={(r) => (
-                r.items.length === 0
-                  ? <div style={{ color: C.faint, fontFamily: SANS, fontSize: 12 }}>No watches in this age range.</div>
-                  : <div>
-                      <div style={{ color: C.gold, fontFamily: SANS, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }} className="mb-1">
-                        {r.label} days — {r.items.length} {r.items.length === 1 ? "watch" : "watches"}
-                      </div>
-                      <ItemTable rows={[...r.items].sort((a, b) => b.age - a.age)} cols={WATCH_COLS} />
-                    </div>
-              )}
-              cols={[
-                ["label","Age bucket",(v) => v + " days"],
-                ["count","Items"],["cost","Cost tied up",fmtMoney],
-              ]} />
-            {M.agedValue > 0 && (
-              <div style={{ color: C.red, fontFamily: SANS, fontSize: 12, marginTop: 10 }}>
-                ⚠ {fmtMoney(M.agedValue)} sitting 91+ days
-              </div>
-            )}
           </div>
         </Panel>
 
