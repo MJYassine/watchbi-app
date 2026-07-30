@@ -1008,9 +1008,11 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         .filter((x) => x.medianDays != null)
         .sort((a, b) => a.medianDays - b.medianDays);
 
-      // buy signals / "most profitable" should ignore models that have only
-      // sold once or twice — not enough history to trust the ranking
-      const modelsForBuy = models.filter((x) => x.units >= 3);
+      // Buy Signals only recommends identifiable watches — never a brand's
+      // "[Brand] — Unknown" bucket (you can't act on "buy an unknown Rolex").
+      const buyModels = models.filter((x) => x.model !== "Unknown");
+      // ...and ignore models sold only once or twice — not enough history to trust
+      const modelsForBuy = buyModels.filter((x) => x.units >= 3);
       out.ranking = [...modelsForBuy].sort((a, b) => b.buyScore - a.buyScore);
 
       // buy-signals hierarchy: brand → product line → model, ranked by summed buy score
@@ -1045,10 +1047,10 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
 
       // ── Top-10 lists (model & product-line granularity) ──
       const top = (arr, n, sortFn) => [...arr].sort(sortFn).slice(0, n);
-      out.fastestModels = top(models.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
+      out.fastestModels = top(buyModels.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
       out.fastestLines = top(out.salesByLine.filter((x) => x.medianDays != null), 10, (a, b) => a.medianDays - b.medianDays);
       // full (un-sliced) fastest lists so the UI can refill after an ignore
-      out.fastestModelsAll = [...models].filter((x) => x.medianDays != null).sort((a, b) => a.medianDays - b.medianDays);
+      out.fastestModelsAll = [...buyModels].filter((x) => x.medianDays != null).sort((a, b) => a.medianDays - b.medianDays);
       out.fastestLinesAll = [...out.salesByLine].filter((x) => x.medianDays != null).sort((a, b) => a.medianDays - b.medianDays);
       out.bestProfitModels = top(modelsForBuy, 10, (a, b) => b.profit - a.profit);
       out.bestProfitLines = top(out.salesByLine, 10, (a, b) => b.profit - a.profit);
