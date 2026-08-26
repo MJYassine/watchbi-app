@@ -1,0 +1,640 @@
+<title>God's Eye &amp; WatchBI</title>
+<meta name="description" content="Client-facing requirements for the WatchBI dashboard, centered on the God's Eye per-salesperson monthly view." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+
+<style>
+  :root {
+    --ground:   #f5f0e6;
+    --panel:    #fffdf8;
+    --panel-2:  #f0e9db;
+    --ink:      #221d15;
+    --ink-soft: #5c5341;
+    --ink-faint:#8a7f68;
+    --line:     #e2d8c3;
+    --line-soft:#ece3d2;
+    --gold:     #9a7526;
+    --gold-br:  #b8873a;
+    --closed:   #566e7a;
+    --cashed:   #9a7526;
+    --open:     #b5623a;
+    --good:     #4f7a4a;
+    --shadow:   0 1px 2px rgba(60,45,20,.05), 0 8px 30px rgba(60,45,20,.06);
+  }
+  :root:not([data-theme="light"]) {
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #14110c;
+      --panel:    #1c1812;
+      --panel-2:  #221d15;
+      --ink:      #f1eadc;
+      --ink-soft: #b1a488;
+      --ink-faint:#8a7d63;
+      --line:     #2f281e;
+      --line-soft:#251f17;
+      --gold:     #c6a15b;
+      --gold-br:  #dcbb78;
+      --closed:   #93a3ac;
+      --cashed:   #c6a15b;
+      --open:     #d0794a;
+      --good:     #86b57e;
+      --shadow:   0 1px 2px rgba(0,0,0,.3), 0 10px 34px rgba(0,0,0,.34);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:   #14110c;
+    --panel:    #1c1812;
+    --panel-2:  #221d15;
+    --ink:      #f1eadc;
+    --ink-soft: #b1a488;
+    --ink-faint:#8a7d63;
+    --line:     #2f281e;
+    --line-soft:#251f17;
+    --gold:     #c6a15b;
+    --gold-br:  #dcbb78;
+    --closed:   #93a3ac;
+    --cashed:   #c6a15b;
+    --open:     #d0794a;
+    --good:     #86b57e;
+    --shadow:   0 1px 2px rgba(0,0,0,.3), 0 10px 34px rgba(0,0,0,.34);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "DM Sans", system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 28px; }
+  .prose { max-width: 66ch; }
+
+  /* ---------- type ---------- */
+  h1, h2, h3 { font-family: "Fraunces", Georgia, serif; font-weight: 500; text-wrap: balance; letter-spacing: -0.01em; }
+  h2 { font-size: clamp(1.5rem, 1rem + 1.8vw, 2rem); line-height: 1.12; margin: 0 0 .2em; }
+  h3 { font-size: 1.16rem; line-height: 1.2; margin: 0 0 .35em; font-weight: 600; }
+  p { margin: 0 0 1rem; }
+  strong { font-weight: 600; color: var(--ink); }
+  a { color: var(--gold); text-decoration-color: color-mix(in srgb, var(--gold) 40%, transparent); text-underline-offset: 3px; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .72rem; font-weight: 500; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--gold); margin: 0 0 1rem;
+  }
+  .kicker { color: var(--ink-faint); }
+
+  /* ---------- masthead ---------- */
+  .masthead { padding: clamp(3.5rem, 8vw, 6rem) 0 2.4rem; border-bottom: 1px solid var(--line); }
+  .masthead .dial {
+    font-family: "IBM Plex Mono", monospace; font-size: .72rem; letter-spacing: .28em;
+    text-transform: uppercase; color: var(--ink-faint); margin: 0 0 1.6rem;
+    display: flex; gap: .9rem; align-items: center;
+  }
+  .masthead .dial::before {
+    content:""; width: 34px; height: 1px; background: var(--gold); display:inline-block;
+  }
+  .masthead h1 {
+    font-family: "Fraunces", Georgia, serif; font-weight: 400;
+    font-size: clamp(2.7rem, 1.4rem + 5.2vw, 4.6rem); line-height: .98; letter-spacing: -0.025em;
+    margin: 0 0 .5rem;
+  }
+  .masthead h1 em { font-style: italic; color: var(--gold); font-weight: 500; }
+  .masthead .lede {
+    font-size: 1.2rem; color: var(--ink-soft); max-width: 54ch; margin: 1.1rem 0 0; line-height: 1.5;
+  }
+  .metabar {
+    margin-top: 2.4rem; display: flex; flex-wrap: wrap; gap: 1.6rem 2.6rem;
+    font-family: "IBM Plex Mono", monospace; font-size: .78rem;
+  }
+  .metabar div { display: flex; flex-direction: column; gap: .28rem; }
+  .metabar dt { color: var(--ink-faint); letter-spacing: .12em; text-transform: uppercase; font-size: .68rem; }
+  .metabar dd { margin: 0; color: var(--ink); }
+
+  /* ---------- sections ---------- */
+  section { padding: 3.4rem 0; border-bottom: 1px solid var(--line-soft); }
+  .sec-index {
+    font-family: "IBM Plex Mono", monospace; font-size: .74rem; letter-spacing: .16em;
+    color: var(--gold); text-transform: uppercase;
+  }
+  .sec-head { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.8rem; }
+
+  /* ---------- change summary ---------- */
+  .changes { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .change {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 20px 18px;
+    box-shadow: var(--shadow);
+  }
+  .change .tag {
+    font-family: "IBM Plex Mono", monospace; font-size: .66rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-faint); display: inline-flex; align-items: center; gap: .5rem; margin-bottom: .7rem;
+  }
+  .change .tag::before { content:""; width: 7px; height: 7px; border-radius: 50%; background: var(--gold); }
+  .change.new .tag::before { background: var(--gold); }
+  .change.refine .tag::before { background: var(--closed); }
+  .change.out .tag::before { background: var(--open); }
+  .change.later .tag::before { background: var(--ink-faint); }
+  .change h3 { font-size: 1.04rem; margin-bottom: .3rem; }
+  .change p { font-size: .92rem; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+
+  /* ---------- closed vs cashed ---------- */
+  .rail-wrap { overflow-x: auto; padding: 6px 0 4px; margin: 1.6rem 0 1.2rem; }
+  .rail { display: flex; min-width: 640px; gap: 0; align-items: stretch; }
+  .stage {
+    flex: 1; text-align: center; padding: 0 6px;
+    position: relative;
+  }
+  .stage .dot {
+    width: 13px; height: 13px; border-radius: 50%; margin: 0 auto 12px;
+    background: var(--panel); border: 2px solid var(--closed);
+    position: relative; z-index: 2;
+  }
+  .stage.cash .dot { border-color: var(--cashed); background: var(--cashed); }
+  .stage::after {
+    content:""; position: absolute; top: 6px; left: 50%; width: 100%; height: 2px;
+    background: var(--line); z-index: 1;
+  }
+  .stage:last-child::after { display: none; }
+  .stage .name { font-size: .82rem; color: var(--ink); font-weight: 500; line-height: 1.25; }
+  .stage .sub  { font-family: "IBM Plex Mono", monospace; font-size: .62rem; color: var(--ink-faint); margin-top: 4px; letter-spacing: .04em; }
+  .brackets { display: flex; min-width: 640px; margin-top: 14px; }
+  .bracket {
+    text-align: center; border-top: 2px solid; padding-top: 8px; position: relative; border-radius: 0;
+  }
+  .bracket::before, .bracket::after {
+    content:""; position: absolute; top: 0; width: 2px; height: 7px; background: currentColor;
+  }
+  .bracket::before { left: 0; } .bracket::after { right: 0; }
+  .bracket.closed { flex: 0 0 60%; color: var(--closed); }
+  .bracket.cashed { flex: 0 0 40%; color: var(--cashed); }
+  .bracket b { font-family: "Fraunces", serif; font-size: 1.05rem; display: block; }
+  .bracket span { font-size: .8rem; color: var(--ink-soft); }
+
+  .rule-card {
+    margin-top: 1.6rem; border-left: 3px solid var(--gold); background: var(--panel-2);
+    padding: 16px 20px; border-radius: 0 10px 10px 0;
+  }
+  .rule-card .lbl { font-family: "IBM Plex Mono", monospace; font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: var(--gold); }
+  .rule-card p { margin: .5rem 0 0; font-size: .96rem; }
+
+  /* chips */
+  .chip {
+    font-family: "IBM Plex Mono", monospace; font-size: .64rem; letter-spacing: .06em; font-weight: 500;
+    padding: 2px 7px; border-radius: 5px; text-transform: uppercase; white-space: nowrap;
+  }
+  .chip.closed { color: var(--closed); border: 1px solid color-mix(in srgb, var(--closed) 45%, transparent); }
+  .chip.cashed { color: var(--cashed); border: 1px solid color-mix(in srgb, var(--cashed) 50%, transparent); }
+
+  /* ---------- god's eye families ---------- */
+  .families { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 1.5rem; }
+  .fam {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column;
+  }
+  .fam h3 { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: .2rem; }
+  .fam h3 .n { font-family: "IBM Plex Mono", monospace; font-size: .66rem; color: var(--ink-faint); font-weight: 400; }
+  .fam .desc { font-size: .84rem; color: var(--ink-soft); margin: 0 0 14px; line-height: 1.45; }
+  .metric-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line-soft); }
+  .metric-row:first-of-type { border-top: none; }
+  .metric-row .m { font-size: .9rem; }
+  .metric-row .bases { display: flex; gap: 5px; flex-shrink: 0; }
+  .fam .note { margin-top: 12px; font-family: "IBM Plex Mono", monospace; font-size: .64rem; color: var(--ink-faint); letter-spacing: .03em; line-height: 1.5; }
+
+  .rowtypes { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 1.4rem; }
+  .rowtype { font-family: "IBM Plex Mono", monospace; font-size: .72rem; color: var(--ink-soft); border: 1px dashed var(--line); border-radius: 7px; padding: 6px 11px; }
+  .rowtype b { color: var(--ink); }
+
+  /* ---------- budgets flow ---------- */
+  .flow { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-top: 1.4rem; }
+  .step { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 18px; box-shadow: var(--shadow); }
+  .step .s-n { font-family: "Fraunces", serif; font-size: 1.5rem; color: var(--gold); line-height: 1; }
+  .step h3 { font-size: .98rem; margin: .5rem 0 .3rem; }
+  .step p { font-size: .86rem; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+
+  /* ---------- open decisions ---------- */
+  .decisions { display: flex; flex-direction: column; gap: 12px; margin-top: 1.4rem; }
+  .decision {
+    display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: start;
+    background: color-mix(in srgb, var(--open) 7%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--open) 30%, var(--line));
+    border-radius: 11px; padding: 16px 18px;
+  }
+  .decision .id { font-family: "IBM Plex Mono", monospace; font-size: .72rem; color: var(--open); font-weight: 600; padding-top: 2px; }
+  .decision h3 { font-size: .98rem; margin-bottom: .25rem; }
+  .decision p { font-size: .89rem; color: var(--ink-soft); margin: 0; }
+
+  /* ---------- requirement catalog ---------- */
+  .cat { margin-top: 2.4rem; }
+  .cat:first-child { margin-top: 1.4rem; }
+  .cat-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--line); }
+  .cat-head h3 { font-family: "Fraunces", serif; font-weight: 500; font-size: 1.3rem; margin: 0; }
+  .cat-head .count { font-family: "IBM Plex Mono", monospace; font-size: .72rem; color: var(--ink-faint); }
+  .reqs { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .req {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 16px 17px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .req .top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .req .rid { font-family: "IBM Plex Mono", monospace; font-size: .74rem; font-weight: 600; color: var(--gold); letter-spacing: .02em; }
+  .req p { margin: 0; font-size: .9rem; line-height: 1.5; color: var(--ink-soft); }
+  .req p .lead { color: var(--ink); font-weight: 500; }
+
+  .pri { font-family: "IBM Plex Mono", monospace; font-size: .6rem; letter-spacing: .1em; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; font-weight: 600; white-space: nowrap; }
+  .pri.must   { background: color-mix(in srgb, var(--gold) 16%, transparent); color: var(--gold-br); border: 1px solid color-mix(in srgb, var(--gold) 35%, transparent); }
+  .pri.should { color: var(--ink-soft); border: 1px solid var(--line); }
+  .pri.could  { color: var(--ink-faint); border: 1px dashed var(--line); }
+  .pri.open   { background: color-mix(in srgb, var(--open) 14%, transparent); color: var(--open); border: 1px solid color-mix(in srgb, var(--open) 34%, transparent); }
+
+  /* ---------- backlog ---------- */
+  .backlog { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 1.3rem; }
+  .back { border: 1px dashed var(--line); border-radius: 11px; padding: 16px 17px; background: transparent; }
+  .back h3 { font-size: .96rem; margin-bottom: .3rem; }
+  .back p { font-size: .85rem; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+  .back.star { border-style: solid; border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); background: var(--panel-2); }
+  .back.star h3 { color: var(--gold-br); }
+
+  /* ---------- footer ---------- */
+  footer { padding: 3rem 0 4rem; }
+  footer .rule { font-family: "IBM Plex Mono", monospace; font-size: .74rem; color: var(--ink-faint); letter-spacing: .06em; }
+  footer .rule b { color: var(--ink); }
+
+  .lead-note { font-size: 1.06rem; color: var(--ink-soft); }
+  .lead-note strong { color: var(--ink); }
+
+  @media (max-width: 620px) {
+    body { font-size: 16px; }
+    .decision { grid-template-columns: 1fr; gap: 6px; }
+    .metabar { gap: 1.2rem 1.8rem; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(14px); animation: rise .7s cubic-bezier(.2,.7,.2,1) forwards; }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+  }
+</style>
+
+<div class="wrap">
+  <header class="masthead reveal">
+    <p class="dial">WatchBI · Requirements Update · Rev. 2026-08-20</p>
+    <h1>God's&nbsp;Eye<br>&amp; the <em>WatchBI</em> dashboard</h1>
+    <p class="lede">The updated requirements for the analytics dashboard — centered on the new per-salesperson monthly view, and how every figure is read two ways: <span style="color:var(--closed)">Closed</span> and <span style="color:var(--cashed)">Cashed</span>.</p>
+    <dl class="metabar">
+      <div><dt>Prepared by</dt><dd>MJ Yassine</dd></div>
+      <div><dt>For</dt><dd>DJ &amp; principals</dd></div>
+      <div><dt>Product</dt><dd>watchbi.watchops.com</dd></div>
+      <div><dt>Baseline</dt><dd>Spec v. 2026-07-21</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">01 — Orientation</span>
+      <h2>What the dashboard is</h2>
+    </div>
+    <div class="prose">
+      <p class="lead-note">WatchBI is an analytics layer over a dealer's <strong>own inventory and sales</strong> — aging and quality grades, sell-through velocity, a configurable per-sale performance grade, restock (buy) signals with funding scenarios, and financial liabilities. It answers a single question in four tabs: <strong>what do I hold, how fast does it move, how well are we selling it, and what do I owe?</strong></p>
+      <p>It ships as its own subscription website on a WatchOps subdomain, open to any dealer. Inventory and sales come from the WatchOps API, or from an uploaded spreadsheet for non-WatchOps books. This document folds the July baseline together with the God's Eye meeting notes — nothing here replaces the working requirements sheet; it states the current agreed picture in plain language.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">02 — This round</span>
+      <h2>What changed</h2>
+    </div>
+    <div class="prose"><p class="kicker" style="margin-bottom:1.6rem">Five decisions came out of the last meeting. Everything else in the baseline stands.</p></div>
+    <div class="changes">
+      <div class="change new">
+        <span class="tag">New</span>
+        <h3>God's Eye table</h3>
+        <p>A per-Sales-Associate monthly scorecard on the Sales tab — every money and unit figure shown in two bases, with an Average and a Total row.</p>
+      </div>
+      <div class="change new">
+        <span class="tag">New</span>
+        <h3>Closed vs Cashed</h3>
+        <p>Every metric is read two ways. Cashed is a single WatchOps status — "Sold &amp; Cashed Out" — so no derivation is needed.</p>
+      </div>
+      <div class="change refine">
+        <span class="tag">Confirmed</span>
+        <h3>Budgets &amp; pacing</h3>
+        <p>A team goal splits to each associate and can be overridden. Pacing is a number the manager enters, not one the system extrapolates.</p>
+      </div>
+      <div class="change out">
+        <span class="tag">Out of scope</span>
+        <h3>Lock-invoice button</h3>
+        <p>Locking a cashed-out invoice is a WatchOps platform feature, not part of God's Eye or this dashboard.</p>
+      </div>
+      <div class="change later">
+        <span class="tag">Deferred</span>
+        <h3>GP-over-time grading</h3>
+        <p>The "A-level inventory" idea (money ÷ days held) is tabled — it belongs to a future Suggested Buy dashboard, not v1.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">03 — The two bases</span>
+      <h2>Closed &amp; Cashed</h2>
+    </div>
+    <div class="prose">
+      <p>A watch moves through WatchOps statuses on its way out the door. A deal is <span style="color:var(--closed);font-weight:600">Closed</span> the moment it's booked, and stays Closed until money is fully in — at which point WatchOps flips it to <span style="color:var(--cashed);font-weight:600">Sold &amp; Cashed Out</span> and it becomes <span style="color:var(--cashed);font-weight:600">Cashed</span>. Every God's Eye figure is shown in both bases so a manager sees committed business and collected business side by side.</p>
+    </div>
+
+    <div class="rail-wrap">
+      <div class="rail">
+        <div class="stage"><div class="dot"></div><div class="name">Invoiced</div><div class="sub">booked</div></div>
+        <div class="stage"><div class="dot"></div><div class="name">Need to Ship</div><div class="sub">preparing</div></div>
+        <div class="stage"><div class="dot"></div><div class="name">Shipped, waiting on payment</div><div class="sub">out, unpaid</div></div>
+        <div class="stage cash"><div class="dot"></div><div class="name">Sold &amp; Cashed Out</div><div class="sub">paid + tracked</div></div>
+      </div>
+      <div class="brackets">
+        <div class="bracket closed"><b>Closed</b><span>booked, not yet collected</span></div>
+        <div class="bracket cashed"><b>Cashed</b><span>fully paid &amp; shipped</span></div>
+      </div>
+    </div>
+
+    <div class="rule-card">
+      <span class="lbl">The cashing rule</span>
+      <p>Nothing reaches <strong>Cashed</strong> unless it is <strong>fully paid</strong>, has a <strong>tracking number</strong>, and has passed through <strong>Shipped waiting on payment</strong>. That gate lives inside WatchOps — the dashboard simply reads the resulting status.</p>
+    </div>
+    <div class="rule-card" style="border-color:var(--closed);border-left-color:var(--closed)">
+      <span class="lbl" style="color:var(--closed)">Which month a deal counts in</span>
+      <p>A deal counts in the <strong>Closed</strong> basis in the month it closed, and in the <strong>Cashed</strong> basis in the month it becomes fully cashed — which can be a later month. A deal is never in both bases at once.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">04 — The scorecard</span>
+      <h2>Inside God's Eye</h2>
+    </div>
+    <div class="prose">
+      <p>One row per Sales Associate, by calendar month, plus an <strong>Average</strong> row and a <strong>Total</strong> row. The columns group into four families. Where a metric carries a <span class="chip closed">Closed</span>/<span class="chip cashed">Cashed</span> pair, both appear.</p>
+    </div>
+
+    <div class="families">
+      <div class="fam">
+        <h3>Gross Profit <span class="n">GP</span></h3>
+        <p class="desc">The full budget-and-pacing treatment — this is what the month is graded on.</p>
+        <div class="metric-row"><span class="m">GP</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">GP Budget</span><span class="bases"><span class="chip" style="color:var(--gold);border:1px solid var(--line)">one target</span></span></div>
+        <div class="metric-row"><span class="m">Pacing</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Over / Under</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <p class="note">Over/Under = pacing − budget. Pacing is manager-entered.</p>
+      </div>
+
+      <div class="fam">
+        <h3>Units</h3>
+        <p class="desc">Same shape as GP — a budgeted, paced count of watches sold.</p>
+        <div class="metric-row"><span class="m">Units</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Unit Budget</span><span class="bases"><span class="chip" style="color:var(--gold);border:1px solid var(--line)">one target</span></span></div>
+        <div class="metric-row"><span class="m">Pacing</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Over / Under</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <p class="note">Budget from the Salesperson Budget tab.</p>
+      </div>
+
+      <div class="fam">
+        <h3>Revenue</h3>
+        <p class="desc">Shown and paced, but not budgeted — there is no revenue target to beat.</p>
+        <div class="metric-row"><span class="m">Revenue</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Pacing</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <p class="note">No revenue budget → no Over/Under. Display + pacing only.</p>
+      </div>
+
+      <div class="fam">
+        <h3>Per-deal quality</h3>
+        <p class="desc">How good each sale was, not just how much — every metric in both bases.</p>
+        <div class="metric-row"><span class="m">GP per unit</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Average aging</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Margin</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <div class="metric-row"><span class="m">Average price</span><span class="bases"><span class="chip closed">Closed</span><span class="chip cashed">Cashed</span></span></div>
+        <p class="note">Aging = days the sold watch was in stock before it sold.</p>
+      </div>
+    </div>
+
+    <div class="rowtypes">
+      <span class="rowtype"><b>Row per</b> Sales Associate</span>
+      <span class="rowtype"><b>+ Average</b> across the team</span>
+      <span class="rowtype"><b>+ Total</b> for the month</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">05 — Targets</span>
+      <h2>Budgets &amp; scoreboard</h2>
+    </div>
+    <div class="prose">
+      <p>The budget columns in God's Eye come from a simple monthly setup, run by an owner or manager about a week before the month starts.</p>
+    </div>
+    <div class="flow">
+      <div class="step">
+        <div class="s-n">1</div>
+        <h3>Set the team goal</h3>
+        <p>A manager enters one team-wide GP goal and one units goal for the coming month.</p>
+      </div>
+      <div class="step">
+        <div class="s-n">2</div>
+        <h3>Split by track record</h3>
+        <p>The goal divides across associates by each one's share of sales over the trailing three months.</p>
+      </div>
+      <div class="step">
+        <div class="s-n">3</div>
+        <h3>Override by hand</h3>
+        <p>Any individual's number can be adjusted directly — the split is a starting point, not a lock.</p>
+      </div>
+      <div class="step">
+        <div class="s-n">4</div>
+        <h3>Track attainment</h3>
+        <p>A monthly scoreboard shows each associate's actual vs goal, with over/under, in revenue and units.</p>
+      </div>
+    </div>
+    <div class="prose"><p style="margin-top:1.4rem" class="kicker">The exact scoreboard column headers are still to come from DJ (see open decisions).</p></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">06 — Still open</span>
+      <h2>Decisions we still need</h2>
+    </div>
+    <div class="decisions">
+      <div class="decision">
+        <span class="id">PLAT-03</span>
+        <div>
+          <h3>How users sign in</h3>
+          <p>Either "sign in with WatchOps" (single sign-on) or the dashboard's own accounts. The same choice applies to Deal Radar, so identity is shared — needs deciding before build.</p>
+        </div>
+      </div>
+      <div class="decision">
+        <span class="id">SCORE-04</span>
+        <div>
+          <h3>Scoreboard headers</h3>
+          <p>The exact columns and labels for the Sales Scoreboard are to be provided by DJ before it's built.</p>
+        </div>
+      </div>
+      <div class="decision">
+        <span class="id">DATA-03</span>
+        <div>
+          <h3>Future market data</h3>
+          <p>WatchCharts is removed and no view depends on outside market data. If WatchOps later exposes pricing, the structure should allow ingesting it (eBay, Chrono24, Bezel, etc.) — no source is committed today.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">07 — Full catalog</span>
+      <h2>Every requirement</h2>
+    </div>
+    <div class="prose">
+      <p>The complete set, grouped by area. Priority reads as
+        <span class="pri must">Must</span> first build ·
+        <span class="pri should">Should</span> fast-follow ·
+        <span class="pri could">Could</span> backlog ·
+        <span class="pri open">Open</span> decision needed.</p>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Platform &amp; access</h3><span class="count">7</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">PLAT-01</span><span class="pri must">Must</span></div><p><span class="lead">Open to any dealer, subscription-gated.</span> Not limited to existing WatchOps customers; without an active subscription it can't be used.</p></div>
+        <div class="req"><div class="top"><span class="rid">PLAT-02</span><span class="pri must">Must</span></div><p><span class="lead">Its own WatchOps subdomain</span> — a sibling to Deal Radar, e.g. watchbi.watchops.com.</p></div>
+        <div class="req"><div class="top"><span class="rid">PLAT-03</span><span class="pri open">Open</span></div><p><span class="lead">Authentication undecided</span> — WatchOps SSO or own accounts; shared with Deal Radar.</p></div>
+        <div class="req"><div class="top"><span class="rid">PLAT-04</span><span class="pri must">Must</span></div><p><span class="lead">Four roles</span> — Owner, Manager, Buyer, Seller — one role set shared with Deal Radar.</p></div>
+        <div class="req"><div class="top"><span class="rid">PLAT-05</span><span class="pri must">Must</span></div><p><span class="lead">Saved settings isolated per dealer</span> — grading config, filters, and exclusions live in the database, private to each account.</p></div>
+        <div class="req"><div class="top"><span class="rid">PLAT-06</span><span class="pri must">Must</span></div><p><span class="lead">Everyone sees all analytics</span> — cost, margins, liabilities, every associate's numbers. Roles gate configuration only, never visibility.</p></div>
+        <div class="req"><div class="top"><span class="rid">PLAT-07</span><span class="pri must">Must</span></div><p><span class="lead">No native app.</span> A responsive web app, installable to the home screen (PWA).</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Data sources</h3><span class="count">6</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">DATA-01</span><span class="pri must">Must</span></div><p><span class="lead">Live inventory from WatchOps</span> — cost, prices, condition, status, type, supplier, serial, payment, purchase date — or an uploaded sheet. Sold &amp; voided items excluded.</p></div>
+        <div class="req"><div class="top"><span class="rid">DATA-02</span><span class="pri must">Must</span></div><p><span class="lead">Sales history from WatchOps</span> — price, cost, condition, salesperson, dates — or an uploaded sheet.</p></div>
+        <div class="req"><div class="top"><span class="rid">DATA-03</span><span class="pri must">Must</span></div><p><span class="lead">Room for future market APIs.</span> None required today; no view depends on outside market data.</p></div>
+        <div class="req"><div class="top"><span class="rid">DATA-04</span><span class="pri must">Must</span></div><p><span class="lead">Correct code legends.</span> WatchOps numeric codes for condition, status, and box/papers translated via the verified legends (an earlier build had condition reversed).</p></div>
+        <div class="req"><div class="top"><span class="rid">DATA-05</span><span class="pri must">Must</span></div><p><span class="lead">Excel/CSV upload with column mapping</span> — the importer detects columns and lets the user confirm the mapping, so any export format works.</p></div>
+        <div class="req"><div class="top"><span class="rid">DATA-06</span><span class="pri must">Must</span></div><p><span class="lead">Reference normalization.</span> PAM01213 = PAM1213 = "PAM 1213"; variants roll up to one base model everywhere.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Inventory analytics</h3><span class="count">7</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">INV-01</span><span class="pri must">Must</span></div><p><span class="lead">Header KPIs</span> — items in stock, capital tied up, count aged 91+ days, median days to sell, overall health.</p></div>
+        <div class="req"><div class="top"><span class="rid">INV-02</span><span class="pri must">Must</span></div><p><span class="lead">Breakdowns</span> — by brand, brand × condition, inventory type, price tier, product line, and model.</p></div>
+        <div class="req"><div class="top"><span class="rid">INV-03</span><span class="pri must">Must</span></div><p><span class="lead">Aging &amp; A–F quality grade</span> by days in stock — A fresh, F heavily aged.</p></div>
+        <div class="req"><div class="top"><span class="rid">INV-04</span><span class="pri must">Must</span></div><p><span class="lead">Sell-through velocity</span> — weekly rate and weeks-of-stock per model and brand; sparse windows must not overstate demand.</p></div>
+        <div class="req"><div class="top"><span class="rid">INV-05</span><span class="pri should">Should</span></div><p><span class="lead">Supplier spend view</span> — spend, units, and aging by supplier.</p></div>
+        <div class="req"><div class="top"><span class="rid">INV-06</span><span class="pri should">Should</span></div><p><span class="lead">Data-quality flags</span> — records missing key fields (no brand/name, no cost).</p></div>
+        <div class="req"><div class="top"><span class="rid">INV-07</span><span class="pri should">Should</span></div><p><span class="lead">Drill-down</span> from brand → line → model.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Sales analytics &amp; God's Eye</h3><span class="count">9</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">SALES-01</span><span class="pri must">Must</span></div><p><span class="lead">Header KPIs</span> — revenue, units, total profit, median margin.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-02</span><span class="pri must">Must</span></div><p><span class="lead">Per-salesperson performance</span> — profit, units, velocity, with drill-in to their sales.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-03</span><span class="pri must">Must</span></div><p><span class="lead">Per-sale performance grade (A–D)</span> from margin and days-on-hand — own figures only, no market data.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-04</span><span class="pri should">Should</span></div><p><span class="lead">Sales by brand &amp; condition</span> — units, revenue, profit, margin.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-05</span><span class="pri must">Must</span></div><p><span class="lead">God's Eye table</span> — one monthly row per Sales Associate, plus Average and Total, every figure in Closed and Cashed.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-06</span><span class="pri must">Must</span></div><p><span class="lead">Closed vs Cashed defined.</span> Cashed = "Sold &amp; Cashed Out"; Closed = booked but not yet cashed. Month-attributed; never both at once.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-07</span><span class="pri must">Must</span></div><p><span class="lead">Core figures</span> — GP, Units, Revenue, each in both bases.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-08</span><span class="pri must">Must</span></div><p><span class="lead">Budgets, pacing, over/under.</span> Budget + pacing + O/U for GP and Units; Revenue gets pacing only. Pacing is manager-entered.</p></div>
+        <div class="req"><div class="top"><span class="rid">SALES-09</span><span class="pri must">Must</span></div><p><span class="lead">Per-deal quality</span> — GP/unit, average aging, margin, average price, each in both bases.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Salesperson budget &amp; scoreboard</h3><span class="count">4</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">SCORE-01</span><span class="pri must">Must</span></div><p><span class="lead">Monthly team goal</span> — a total GP goal and units goal, entered ~a week before the month.</p></div>
+        <div class="req"><div class="top"><span class="rid">SCORE-02</span><span class="pri must">Must</span></div><p><span class="lead">Auto-split, overridable</span> — divided per associate by trailing-3-month share, with manual override.</p></div>
+        <div class="req"><div class="top"><span class="rid">SCORE-03</span><span class="pri should">Should</span></div><p><span class="lead">Scoreboard</span> — monthly attainment, actual vs goal, over/under, in revenue and units.</p></div>
+        <div class="req"><div class="top"><span class="rid">SCORE-04</span><span class="pri open">Open</span></div><p><span class="lead">Headers from DJ</span> — exact scoreboard columns to be confirmed before build.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Buy signals &amp; funding</h3><span class="count">4</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">BUY-01</span><span class="pri must">Must</span></div><p><span class="lead">Restock recommendations</span> — models ranked by a buy score from own demand and profitability, with drill-down. Distinct from Deal Radar's live alerts.</p></div>
+        <div class="req"><div class="top"><span class="rid">BUY-02</span><span class="pri should">Should</span></div><p><span class="lead">Funding scenarios</span> — spread a budget across top candidates; exclude a model to free its budget for the next pick, and restore it.</p></div>
+        <div class="req"><div class="top"><span class="rid">BUY-03</span><span class="pri must">Must</span></div><p><span class="lead">Watches to sell</span> — worst inventory grade first, then most capital tied up.</p></div>
+        <div class="req"><div class="top"><span class="rid">BUY-04</span><span class="pri should">Should</span></div><p><span class="lead">Day-supply target</span> — allocate to reach a target days-of-stock, then show leftover budget separately with suggested buys.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Projections</h3><span class="count">2</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">PROJ-01</span><span class="pri should">Should</span></div><p><span class="lead">Projected profit</span> — target price minus cost, over the priced portion of inventory.</p></div>
+        <div class="req"><div class="top"><span class="rid">PROJ-02</span><span class="pri should">Should</span></div><p><span class="lead">Projected vs realized</span> — by model and brand, so projected margins can be checked against actuals.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Liabilities</h3><span class="count">4</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">LIAB-01</span><span class="pri must">Must</span></div><p><span class="lead">Unpaid inventory</span> — total still owed on unpaid stock.</p></div>
+        <div class="req"><div class="top"><span class="rid">LIAB-02</span><span class="pri must">Must</span></div><p><span class="lead">Consignment &amp; memo</span> — value of goods held but not owned outright.</p></div>
+        <div class="req"><div class="top"><span class="rid">LIAB-03</span><span class="pri should">Should</span></div><p><span class="lead">Overpaid invoices</span> — negative-balance invoices listed and totalled.</p></div>
+        <div class="req"><div class="top"><span class="rid">LIAB-04</span><span class="pri should">Should</span></div><p><span class="lead">Sales tax owed</span> — estimated and grouped by state.</p></div>
+      </div>
+    </div>
+
+    <div class="cat">
+      <div class="cat-head"><h3>Grading, UI &amp; foundations</h3><span class="count">12</span></div>
+      <div class="reqs">
+        <div class="req"><div class="top"><span class="rid">GRADE-01</span><span class="pri should">Should</span></div><p><span class="lead">Tunable sale grade</span> — admin sets margin-vs-speed weighting, thresholds, and harshness; applies business-wide.</p></div>
+        <div class="req"><div class="top"><span class="rid">GRADE-02</span><span class="pri should">Should</span></div><p><span class="lead">Tunable aging grade</span> — admin sets the day thresholds for A–F.</p></div>
+        <div class="req"><div class="top"><span class="rid">UI-01</span><span class="pri must">Must</span></div><p><span class="lead">Four tabs</span> — Inventory, Sales, Buy Signals, Liabilities. Live alerts live in Deal Radar, not here.</p></div>
+        <div class="req"><div class="top"><span class="rid">UI-02</span><span class="pri should">Should</span></div><p><span class="lead">Global filters</span> — brand, status, period across the analytic views. Liabilities always show full exposure.</p></div>
+        <div class="req"><div class="top"><span class="rid">UI-03</span><span class="pri should">Should</span></div><p><span class="lead">Drill-down throughout</span> — brand → model, salesperson → sales, model → items.</p></div>
+        <div class="req"><div class="top"><span class="rid">UI-04</span><span class="pri should">Should</span></div><p><span class="lead">Exclude &amp; restore</span> within an analysis; ad-hoc tweaks are personal, saved config is admin-tier.</p></div>
+        <div class="req"><div class="top"><span class="rid">UI-05</span><span class="pri must">Must</span></div><p><span class="lead">Always live</span> — auto-refresh on a schedule and re-pull on page reload.</p></div>
+        <div class="req"><div class="top"><span class="rid">NFR-01</span><span class="pri must">Must</span></div><p><span class="lead">Strict per-business isolation</span> of data and derived analytics.</p></div>
+        <div class="req"><div class="top"><span class="rid">NFR-02</span><span class="pri should">Should</span></div><p><span class="lead">Responsive at full scale</span> — caching / incremental compute over a full book.</p></div>
+        <div class="req"><div class="top"><span class="rid">NFR-03</span><span class="pri must">Must</span></div><p><span class="lead">Correct ingestion</span> — page all records, exclude sold/voided, map inventory types.</p></div>
+        <div class="req"><div class="top"><span class="rid">CUST-01</span><span class="pri should">Should</span></div><p><span class="lead">Customer view</span> from sold history — margin, dollars, buying velocity per customer.</p></div>
+        <div class="req"><div class="top"><span class="rid">CUST-02</span><span class="pri should">Should</span></div><p><span class="lead">Supplier view</span> from sold history — margin, dollars, velocity per supplier.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="sec-index">08 — Later</span>
+      <h2>Deferred &amp; backlog</h2>
+    </div>
+    <div class="backlog">
+      <div class="back star">
+        <h3>Suggested Buy — GP-over-time grading</h3>
+        <p>The "A-level inventory" idea: grade stock by GP per day held, weighted by current inventory mix and recent trend, so a model that sold well historically but has gone quiet pulls its own rebuy signal down. Its own future dashboard — not v1. Grading itself is tabled.</p>
+      </div>
+      <div class="back"><h3>Billing granularity</h3><p>Per-business vs per-seat unlock — affects only the entitlement check.</p></div>
+      <div class="back"><h3>Market data, if WatchOps adds it</h3><p>Market-comparison views could return if WatchOps later exposes pricing.</p></div>
+      <div class="back"><h3>Sales trends over time</h3><p>A time-series sales view existed in an early build; reconsider if wanted.</p></div>
+      <div class="back"><h3>Live non-WatchOps connector</h3><p>Upload already works; an auto-refreshing Google Sheet / API connector is open.</p></div>
+      <div class="back"><h3>Export / reporting</h3><p>CSV / PDF export or scheduled reports — not in the current build.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <p class="rule"><b>WatchBI</b> — God's Eye requirements update · Prepared by MJ Yassine · Baseline spec 2026-07-21, revised 2026-08-20. Companion to the working requirements sheet.</p>
+  </footer>
+</div>

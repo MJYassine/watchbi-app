@@ -58,6 +58,7 @@ const FIELDS = {
     ["brand", "Brand"], ["modelName", "Model name"], ["modelNumber", "Model / reference #"],
     ["cost", "Cost (total)"], ["purchaseDate", "Purchase date"],
     ["targetWholesale", "Target wholesale price"], ["tagPrice", "Tag price"],
+    ["targetEndCustomer", "Target end-customer price (optional)"],
     ["condition", "Condition — New/Used (optional)"], ["status", "Status"],
     ["invType", "Inventory type — Owned/Consignment/Memo (optional)"],
     ["paymentStatus", "Payment status — Paid/Unpaid/Voided (optional)"],
@@ -121,6 +122,7 @@ function guessField(role, header) {
   if (has("cogs") || has("total cost") || h === "cost") return "cost";
   if (has("wholesale")) return "targetWholesale";
   if (has("tag price")) return "tagPrice";
+  if (has("end customer") || has("end-customer")) return "targetEndCustomer";
   if (has("status") && !has("payment")) return "status";
   if (has("serial")) return "serial";
   return null;
@@ -276,20 +278,25 @@ function ageGrade(age) {
 }
 const GRADE_RANK = { A: 0, B: 1, C: 2, D: 3, F: 4 };
 
-/* market-value grades vs WatchCharts median asking price (A best) */
-// how well you SOLD: sale price as % of market. higher = better.
+/* WatchCharts market-value grades (A best). Each of our prices is graded against
+   the market benchmark at the SAME level, per the WatchOps<->WatchCharts mapping:
+     retail target (tag / end-customer) -> median asking price
+     wholesale target                   -> dealer price
+     cost                               -> dealer price (fair market_price as fallback)
+     actual sale price                  -> median asking price */
+// how well you SOLD: sale price as % of market asking. higher = better.
 function salesGrade(price, market) {
   if (!market || price == null) return null;
   const pct = (price / market) * 100;
   if (pct >= 100) return "A"; if (pct >= 95) return "B"; if (pct >= 90) return "C"; return "D";
 }
-// Quality of Cost: what you PAID as % of market. lower = better.
+// Quality of Cost: what you PAID as % of the wholesale/dealer benchmark. lower = better.
 function qocGrade(cost, market) {
   if (!market || !cost) return null;
   const pct = (cost / market) * 100;
   if (pct >= 100) return "D"; if (pct >= 95) return "C"; if (pct >= 90) return "B"; return "A";
 }
-// Quality of Target: your target price vs market. A = priced near market, then wider bands.
+// Quality of Target: how close a target is to its market benchmark. A = near, then wider bands.
 function qotGrade(target, market) {
   if (!market || !target || target <= 0) return null;
   const d = Math.abs((target / market) * 100 - 100);
@@ -450,6 +457,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       const cost = toNum(r[m.cost]);
       const tw = toNum(r[m.targetWholesale]);
       const tag = toNum(r[m.tagPrice]);
+      const tec = toNum(r[m.targetEndCustomer]);
       const brandNorm = normalizeBrand(r[m.brand]);
       const pd = toDate(r[m.purchaseDate]);
       const age = pd ? daysBetween(pd, today) : null;
@@ -469,6 +477,7 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
         purchaseDate: pd,
         targetWholesale: tw,
         tagPrice: tag,
+        targetEndCustomer: tec,
         age,
         grade: ageGrade(age),
         condition: normalizeCondition(r[m.condition]),
@@ -560,6 +569,8 @@ function computeMetrics(datasets, dateRange, includePresold, windowDays, invStat
       .map((x) => ({
         brand: x.brand, model: x.chartName || x.modelName, reference: x.modelNumber,
         age: x.age, grade: x.grade, cost: x.cost, targetWholesale: x.targetWholesale,
+        // retail target: tag price preferred, end-customer price as fallback
+        retailTarget: x.tagPrice ?? x.targetEndCustomer ?? null,
       }));
 
     // ── data quality: how many items are missing each key field ──
@@ -2160,17 +2171,28 @@ function OldestMarketTable({ rows }) {
   const { lookup, loading, err } = useMarketValues(rows);
   const graded = rows.map((r) => {
     const mv = lookup(r.brand, r.reference);
-    const m = mv?.medianAsking ?? null;
-    return { ...r, median: m, qoc: qocGrade(r.cost, m), qot: qotGrade(r.targetWholesale, m) };
+    const asking = mv?.medianAsking ?? null;               // market retail
+    const dealer = mv?.dealerPrice ?? null;                // market wholesale
+    const costBench = dealer ?? mv?.marketPrice ?? null;   // wholesale, fair value as fallback
+    return {
+      ...r, median: asking, dealer,
+      qoc: qocGrade(r.cost, costBench),                    // cost vs wholesale/dealer
+      qow: qotGrade(r.targetWholesale, dealer),            // wholesale target vs dealer price
+      qot: qotGrade(r.retailTarget, asking),               // retail target vs median asking
+    };
   });
   return (
     <>
       <MarketStatus loading={loading} err={err} />
       <ItemTable rows={graded} cols={[
         ["brand","Brand"],["model","Model"],["reference","Ref #"],["age","Days in stock"],
-        ["cost","Cost",fmtMoney],["targetWholesale","Target",(v) => v ? fmtMoney(v) : "—"],
-        ["median","Median asking",(v) => v ? fmtMoney(v) : "—"],
+        ["cost","Cost",fmtMoney],
+        ["targetWholesale","Wholesale target",(v) => v ? fmtMoney(v) : "—"],
+        ["dealer","Dealer price",(v) => v ? fmtMoney(v) : "—"],
+        ["qow","QoW",(v) => <GradeBadge grade={v} />],
         ["qoc","QoC",(v) => <GradeBadge grade={v} />],
+        ["retailTarget","Retail target",(v) => v ? fmtMoney(v) : "—"],
+        ["median","Median asking",(v) => v ? fmtMoney(v) : "—"],
         ["qot","QoT",(v) => <GradeBadge grade={v} />],
       ]} />
     </>
@@ -2718,11 +2740,12 @@ function InventoryTab({ M, filters }) {
 
       {/* ════ MARKET GRADES ════ */}
       {sub === "market" && (
-        <Panel title="Oldest 20 in stock — vs WatchCharts market" note="target & cost graded against median asking price">
+        <Panel title="Oldest 20 in stock — vs WatchCharts market" note="each price graded against its matching market level">
           <div style={{ color: C.dim, fontFamily: SANS, fontSize: 12, marginBottom: 12 }}>
-            Your 20 longest-held watches, compared to WatchCharts' <b>median asking price</b>.
-            <b> QoC</b> (Quality of Cost) grades what you paid vs market — A = paid under 90% of market, D = paid 100%+.
-            <b> QoT</b> (Quality of Target) grades how close your target price is to market — A = within 3%, down to D = off by more than 15%.
+            Your 20 longest-held watches, each price compared to the WatchCharts value at the <b>same market level</b>.
+            <b> QoC</b> (Quality of Cost) grades what you paid vs the <b>dealer</b> (wholesale) price — A = paid under 90%, D = paid 100%+.
+            <b> QoW</b> (Quality of Wholesale target) grades how close your wholesale target is to the <b>dealer price</b> — A = within 3%, down to D = off by more than 15%.
+            <b> QoT</b> (Quality of retail Target) grades how close your retail target (tag / end-customer) is to the <b>median asking</b> price — same bands.
           </div>
           {(M.oldest20 || []).length === 0
             ? <Locked msg="No inventory with age data to grade." />
