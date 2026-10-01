@@ -1,0 +1,27 @@
+# Render Blueprint — recreate the WatchBI web service from code.
+# In Render: New → Blueprint → pick this repo. Secret values are NOT stored here
+# (sync: false) — Render prompts for each one when you apply the Blueprint.
+services:
+  - type: web
+    name: watchbi-app
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    # No healthCheckPath: the whole app is behind HTTP basic auth (APP_PASSWORD),
+    # so any health probe would get a 401. Render marks it live once the port binds.
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: WATCHOPS_TOKEN
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_DRIVE_FOLDER_ID
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: APP_USER
+        sync: false
+      - key: WATCHCHARTS_API_KEY
+        sync: false
